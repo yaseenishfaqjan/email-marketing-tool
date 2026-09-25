@@ -1,0 +1,24 @@
+{
+  "name": "email-marketing-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-brand email marketing platform on Amazon SES.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "worker": "node src/worker/send-worker.mjs",
+    "migrate": "node db/migrate.mjs",
+    "seed": "node db/seed.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sesv2": "^3.693.0",
+    "csv-parse": "^5.6.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "mjml": "^4.15.3",
+    "pg": "^8.13.1"
+  }
+}

@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Secrets — never commit these. A .gitignore added after the fact does not
+# remove anything from git history.
+.env
+.env.*
+!.env.example
+*SECRETS*
+*.pem
+*.key
+
+# Deployment bundles. A .gitignore cannot see inside an archive, and a tarball
+# built from a working directory carries whatever .env was sitting in it.
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Local data
+data/
+tmp/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

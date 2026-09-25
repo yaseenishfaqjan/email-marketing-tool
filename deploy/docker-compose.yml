@@ -1,0 +1,66 @@
+# The platform: API, worker, Postgres.
+#
+# Two processes, not one. The API answers requests in milliseconds; the worker
+# spends minutes draining a broadcast. Sharing a process means a big send makes
+# the signup form slow, and restarting to deploy an API fix interrupts a send.
+
+services:
+  mailer-db:
+    image: postgres:16-alpine
+    container_name: mailer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mailer
+      POSTGRES_DB: mailer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      # A named volume, never a bind mount into the deploy directory. A
+      # redeploy replaces that directory, and the contacts are the asset here.
+      - mailer-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [mailernet]
+
+  mailer-api:
+    image: node:22-alpine
+    container_name: mailer-api
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm ci --omit=dev --no-audit --no-fund && npm run migrate && node src/server.mjs"
+    env_file: [./.env]
+    environment:
+      DATABASE_URL: postgres://mailer:${POSTGRES_PASSWORD}@mailer-db:5432/mailer
+    ports:
+      - "8090:8080"
+    volumes:
+      - ..:/app
+    depends_on:
+      mailer-db:
+        condition: service_healthy
+    networks: [mailernet]
+
+  mailer-worker:
+    image: node:22-alpine
+    container_name: mailer-worker
+    restart: unless-stopped
+    working_dir: /app
+    # Waits for the API to have run the migrations before it starts claiming.
+    command: sh -c "npm ci --omit=dev --no-audit --no-fund && sleep 10 && node src/worker/send-worker.mjs"
+    env_file: [./.env]
+    environment:
+      DATABASE_URL: postgres://mailer:${POSTGRES_PASSWORD}@mailer-db:5432/mailer
+    volumes:
+      - ..:/app
+    depends_on:
+      mailer-db:
+        condition: service_healthy
+    networks: [mailernet]
+
+volumes:
+  mailer-data:
+
+networks:
+  mailernet:
