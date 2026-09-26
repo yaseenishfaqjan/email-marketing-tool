@@ -7,6 +7,8 @@ import { query } from '../../db.mjs';
 import { requireAdmin, resolveBrand } from '../middleware/auth.mjs';
 import * as contacts from '../../contacts/repo.mjs';
 import { importCsv } from '../../contacts/import.mjs';
+import { report as hygieneReport } from '../../contacts/hygiene.mjs';
+import { parse as parseCsv } from 'csv-parse/sync';
 import * as suppression from '../../suppression/repo.mjs';
 import { compileSegment, SegmentError } from '../../segments/compile.mjs';
 
@@ -45,6 +47,52 @@ router.post('/contacts', async (req, res, next) => {
     res.status(contact.created ? 201 : 200).json({ contact });
   } catch (err) { next(err); }
 });
+
+/**
+ * What this CSV would do, without doing it.
+ *
+ * Worth running on anything you did not collect yourself. A bad import is not
+ * a local mistake: it raises the bounce rate on an account all five brands
+ * share, and the cost of discovering that afterwards is measured in weeks of
+ * suspended sending.
+ */
+router.post('/contacts/import/dry-run',
+  express.text({ type: ['text/csv', 'text/plain'], limit: '25mb' }),
+  async (req, res, next) => {
+    if (!req.body || typeof req.body !== 'string') {
+      return res.status(400).json({ error: 'Post the CSV as the request body with Content-Type: text/csv.' });
+    }
+    try {
+      const records = parseCsv(req.body, { skip_empty_lines: true, relax_column_count: true, bom: true });
+      if (records.length === 0) return res.json({ counts: { total: 0 }, verdict: { level: 'empty' } });
+
+      const header = records[0].map((h) => String(h).trim().toLowerCase().replace(/\s+/g, '_'));
+      const emailAt = header.findIndex((h) => ['email', 'email_address', 'e-mail', 'mail'].includes(h));
+      if (emailAt === -1) {
+        return res.status(400).json({ error: 'No email column found. The header row needs a column called "email".' });
+      }
+
+      const emails = records.slice(1).map((r) => r[emailAt]);
+      const { counts, samples, verdict } = hygieneReport(emails);
+
+      // How many are already suppressed matters as much as how many are
+      // malformed: those would be skipped on import, and their presence says
+      // something about where the list came from.
+      const { rows } = await query(
+        `select count(*)::int as n from suppressions
+          where (brand_id is null or brand_id = $1) and email = any($2::citext[])`,
+        [req.brandId, emails.filter((e) => typeof e === 'string').map((e) => e.trim().toLowerCase())],
+      );
+
+      res.json({
+        counts: { ...counts, already_suppressed: rows[0].n },
+        samples,
+        verdict,
+        would_import: Math.max(0, counts.valid - rows[0].n),
+        note: 'Nothing was written. Post the same CSV to /contacts/import to do it for real.',
+      });
+    } catch (err) { next(err); }
+  });
 
 router.post('/contacts/import', express.text({ type: ['text/csv', 'text/plain'], limit: '25mb' }),
   async (req, res, next) => {

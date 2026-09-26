@@ -27,6 +27,8 @@ import formsAdmin from './http/routes/forms.mjs';
 import formPublic from './http/routes/form-public.mjs';
 import templates from './http/routes/templates.mjs';
 import reports from './http/routes/reports.mjs';
+import warmupRoutes from './http/routes/warmup.mjs';
+import dashboard from './http/routes/dashboard.mjs';
 
 export function createApp({ logErrors = true } = {}) {
   const app = express();
@@ -63,6 +65,7 @@ export function createApp({ logErrors = true } = {}) {
   app.use('/v1', events);
 
   // Admin.
+  app.use('/', dashboard);
   app.use('/v1/brands', brands);
   app.use('/v1/brands/:brandId', contacts);
   app.use('/v1/brands/:brandId', campaigns);
@@ -70,6 +73,7 @@ export function createApp({ logErrors = true } = {}) {
   app.use('/v1/brands/:brandId', formsAdmin);
   app.use('/v1/brands/:brandId', templates);
   app.use('/v1/brands/:brandId', reports);
+  app.use('/v1/brands/:brandId', warmupRoutes);
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

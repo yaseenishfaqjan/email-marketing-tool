@@ -1,0 +1,91 @@
+# Production. Three containers on the VPS, nothing else on the box touched.
+#
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# The API and the worker are separate processes on purpose. The API answers in
+# milliseconds; the worker spends minutes draining a broadcast. Sharing a
+# process would make the signup form slow during a send, and restarting to
+# deploy an API fix would interrupt one.
+
+services:
+  mailer-db:
+    image: postgres:16-alpine
+    container_name: mailer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mailer
+      POSTGRES_DB: mailer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in ../.env}
+    volumes:
+      # A named volume, never a bind mount into the deploy directory. A
+      # redeploy replaces that directory, and the contacts are the asset here.
+      - mailer-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not published. Nothing outside this network needs to reach the database,
+    # and a Postgres port open to the internet is found within hours.
+    networks: [mailernet]
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  mailer-api:
+    image: node:22-alpine
+    container_name: mailer-api
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm ci --omit=dev --no-audit --no-fund && npm run migrate && npm run templates && node src/server.mjs"
+    env_file: [../.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://mailer:${POSTGRES_PASSWORD}@mailer-db:5432/mailer
+    ports:
+      # Bound to localhost: nginx terminates TLS and proxies in. Published on
+      # 0.0.0.0 this would serve the admin API to the open internet over plain
+      # HTTP.
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - ..:/app
+      - api-modules:/app/node_modules
+    depends_on:
+      mailer-db: { condition: service_healthy }
+    networks: [mailernet]
+    logging: *logging
+
+  mailer-worker:
+    image: node:22-alpine
+    container_name: mailer-worker
+    restart: unless-stopped
+    working_dir: /app
+    # Waits for the API to have finished migrating before it starts claiming.
+    command: sh -c "npm ci --omit=dev --no-audit --no-fund && sleep 15 && node src/worker/send-worker.mjs"
+    env_file: [../.env]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://mailer:${POSTGRES_PASSWORD}@mailer-db:5432/mailer
+    volumes:
+      - ..:/app
+      - worker-modules:/app/node_modules
+    depends_on:
+      mailer-db: { condition: service_healthy }
+    # ONE worker. Each process owns its own send-rate token bucket, so two
+    # would together exceed the SES rate. Scaling past one means moving the
+    # rate limiter to Redis — see the note in the README.
+    deploy:
+      replicas: 1
+    # SIGTERM lets it finish the batch in flight rather than abandoning
+    # messages in 'sending'.
+    stop_grace_period: 60s
+    networks: [mailernet]
+    logging: *logging
+
+volumes:
+  mailer-data:
+  api-modules:
+  worker-modules:
+
+networks:
+  mailernet:

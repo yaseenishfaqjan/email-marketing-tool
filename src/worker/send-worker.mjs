@@ -19,6 +19,7 @@ import { TokenBucket } from '../sending/rate-limit.mjs';
 import { finaliseIfDone } from '../campaigns/materialise.mjs';
 import { tick as automationTick } from '../automations/engine.mjs';
 import { confirmUrl, DEFAULTS as FORM_DEFAULTS } from '../forms/repo.mjs';
+import { headroom, recordSends } from '../sending/warmup.mjs';
 
 const MAX_ATTEMPTS = 5;
 const bucket = new TokenBucket(config.ses.maxSendRate);
@@ -130,12 +131,20 @@ async function loadMessageContext(message) {
   return ctx;
 }
 
-/** Take up to `limit` messages, marking them 'sending' so nobody else picks them up. */
-export async function claimBatch(limit) {
+/**
+ * Take up to `limit` of one brand's queued messages, marking them 'sending' so
+ * nobody else picks them up.
+ *
+ * Scoped to a brand, because the daily allowance is per brand: claiming
+ * globally would let one brand's 50,000-recipient broadcast spend another
+ * brand's entire warm-up budget for the day.
+ */
+export async function claimBatch(limit, brandId = null) {
   const { rows } = await query(
     `with claimed as (
        select id from messages
         where status = 'queued'
+          and ($2::uuid is null or brand_id = $2)
         order by queued_at
         limit $1
         for update skip locked
@@ -146,7 +155,7 @@ export async function claimBatch(limit) {
       where m.id = claimed.id
       returning m.id, m.campaign_id, m.automation_run_id, m.automation_step_id,
                 m.form_submission_id, m.contact_id, m.brand_id, m.attempts`,
-    [limit],
+    [limit, brandId],
   );
   return rows;
 }
@@ -190,11 +199,15 @@ async function requeue(message, reason) {
   );
 }
 
+/** Returned by processMessage when nothing reached SES, so no allowance was spent. */
+export const SKIPPED = Symbol('skipped');
+
 async function skip(message, reason) {
   await query(
     "update messages set status = 'skipped', error = $2 where id = $1",
     [message.id, reason],
   );
+  return SKIPPED;
 }
 
 export async function processMessage(message) {
@@ -286,29 +299,70 @@ export async function processMessage(message) {
   }
 }
 
-export async function tick() {
-  const batch = await claimBatch(config.worker.batchSize);
-  if (batch.length === 0) return 0;
+/** Brands already reported as capped, so the log says it once rather than every poll. */
+const cappedLogged = new Set();
 
-  // Sequential, not parallel: the rate limiter already decides the pace, and
-  // running them in parallel just means more sockets waiting on the same
-  // bucket.
-  for (const message of batch) {
+/**
+ * One pass: for each brand with queued mail, send as much as its warm-up
+ * allowance still permits today.
+ *
+ * A brand at its cap is skipped, not failed. Its messages stay queued and go
+ * out tomorrow -- a send that is a day late is a send, and a suspended account
+ * is not.
+ */
+export async function tick() {
+  const brands = await headroom();
+  if (brands.length === 0) return 0;
+
+  let processed = 0;
+  const touchedCampaigns = new Set();
+
+  for (const brand of brands) {
     if (!running) break;
-    try {
-      await processMessage(message);
-    } catch (err) {
-      console.error('[worker] message %s failed unexpectedly: %s', message.id, err.message);
-      await requeue(message, err.message).catch(() => {});
+
+    if (brand.take <= 0) {
+      if (!cappedLogged.has(brand.brandId)) {
+        console.log('[worker] %s is at its daily cap (%d sent, %s) -- %d message(s) wait for tomorrow',
+          brand.name, brand.sent, brand.reason, brand.queued);
+        cappedLogged.add(brand.brandId);
+      }
+      continue;
     }
+    cappedLogged.delete(brand.brandId);
+
+    const batch = await claimBatch(Math.min(config.worker.batchSize, brand.take), brand.brandId);
+    if (batch.length === 0) continue;
+
+    // Sequential, not parallel: the rate limiter already decides the pace, and
+    // running them in parallel just means more sockets waiting on the same
+    // bucket.
+    let spent = 0;
+    for (const message of batch) {
+      if (!running) break;
+      try {
+        const result = await processMessage(message);
+        // Only mail that actually reached SES counts against the allowance.
+        // A skipped message -- suppressed, unsubscribed, deleted -- spent no
+        // reputation and should not cost somebody else's send.
+        if (result !== SKIPPED) spent += 1;
+      } catch (err) {
+        console.error('[worker] message %s failed unexpectedly: %s', message.id, err.message);
+        await requeue(message, err.message).catch(() => {});
+      }
+      if (message.campaign_id) touchedCampaigns.add(message.campaign_id);
+    }
+
+    await recordSends(brand.brandId, spent).catch((err) =>
+      console.error('[worker] recording sends for %s: %s', brand.name, err.message));
+    processed += batch.length;
   }
 
-  for (const campaignId of new Set(batch.map((m) => m.campaign_id).filter(Boolean))) {
+  for (const campaignId of touchedCampaigns) {
     await finaliseIfDone(campaignId).catch((err) =>
       console.error('[worker] finalise %s: %s', campaignId, err.message));
   }
 
-  return batch.length;
+  return processed;
 }
 
 /**

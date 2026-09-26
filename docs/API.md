@@ -510,3 +510,107 @@ Gmail at 12% opens while Outlook sits at 2% is not a content problem. It is an
 authentication or reputation problem at one provider, and it is completely
 invisible in the overall rate. Domains with fewer than five recipients are
 omitted, because those rates would be noise.
+
+---
+
+# Operations (Phase 5)
+
+## Warm-up
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/brands/:id/warmup` | every brand's position on the ramp |
+| `GET` | `/v1/brands/:id/warmup/plan` | the schedule, marking where this brand is |
+| `PATCH` | `/v1/brands/:id/warmup` | `daily_send_cap`, `warmup_enabled`, `warmup_started_at` |
+
+A new sending domain has no reputation. Mailing a cold list at full volume on
+day one is the classic way to have an account suspended in week one — and
+because SES reputation is account-level, that takes all five businesses down
+together.
+
+So the ramp is **enforced by the worker**, not written in a runbook:
+
+| Days | Cap per brand per day |
+|---|---|
+| 1–2 | 500 |
+| 3–4 | 2,000 |
+| 5–7 | 10,000 |
+| 8–10 | 25,000 |
+| 11–13 | 50,000 |
+| 14–16 | 100,000 |
+| 17–20 | 250,000 |
+| 21+ | no limit |
+
+The clock starts on a brand's **first send**, not when you create it —
+otherwise a brand configured a fortnight early arrives at day 15 having never
+sent anything.
+
+Hitting a cap **drops nothing**. The rest of the queue goes out tomorrow.
+
+The allowance is per brand, so one brand's 50,000-recipient broadcast cannot
+spend another brand's entire budget for the day. And a skipped message — a
+suppressed contact, an unsubscribe that landed mid-send — never reached SES,
+so it costs no allowance.
+
+### Stopping a send
+
+```bash
+# Pause this brand's marketing. Transactional mail is unaffected.
+curl -X PATCH ".../warmup" -d '{"daily_send_cap": 0}'
+
+# Back on the schedule.
+curl -X PATCH ".../warmup" -d '{"daily_send_cap": null}'
+```
+
+`warmup_started_at: null` restarts the ramp on the next send — the right move
+after a long pause or a reputation problem, when the domain is effectively
+unknown again.
+
+## Import dry run
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/brands/:id/contacts/import/dry-run` | `Content-Type: text/csv` |
+
+Run this on anything you did not collect yourself. Nothing is written.
+
+```json
+{
+  "counts": { "total": 4812, "valid": 4780, "malformed": 12, "duplicates": 20,
+              "role_accounts": 140, "disposable": 6, "likely_typos": 31,
+              "already_suppressed": 26, "clean": 4589 },
+  "samples": { "likely_typos": ["grace@gmial.com → grace@gmail.com"] },
+  "verdict": { "level": "clean_first",
+               "message": "This list has enough visible problems to be worth cleaning first.",
+               "action": "Fix the suggested typos, drop the disposable addresses, then import." },
+  "would_import": 4754
+}
+```
+
+| Verdict | |
+|---|---|
+| `ok` | import it |
+| `check_consent` | mostly role accounts (info@, sales@) — confirm they opted in |
+| `clean_first` | fixable problems; fix them and re-run |
+| `do_not_import` | **stop** — find out where this list came from |
+
+Nothing is rejected automatically. A heuristic that silently drops real
+customers is worse than the bounce it prevented — so it reports, with
+examples, and you decide.
+
+The typo list is worth acting on: every `gmial.com` is a real customer who
+mistyped their own address. Left alone it is a guaranteed hard bounce;
+corrected, it is a subscriber.
+
+## Dashboard
+
+```
+GET /dashboard              (admin token; add ?format=json for the data)
+```
+
+Read-only, server-rendered, works on a phone. It answers the three questions
+you actually have during a launch week: is the account in danger, where is
+each brand on its ramp, is anything stuck.
+
+A dashboard that can also delete things is a dashboard nobody dares leave open
+on a second monitor.
