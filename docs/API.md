@@ -264,3 +264,110 @@ Usable in segments and in `condition` steps alike:
 { "field": "event", "op": "has" | "not_has",
   "value": "feature_used", "within_days": 7 }
 ```
+
+---
+
+# Forms and double opt-in (Phase 4)
+
+## Why double opt-in is the default
+
+It costs perhaps 20% of raw signups, and it is worth it three times over. It
+keeps typo'd and hostile addresses off the list, and list hygiene is what keeps
+the SES account alive — for **every brand at once**, because SES reputation is
+account-level.
+
+A submission is a **claim**, not a fact: anybody can type anybody's address
+into a form on the open internet. It becomes consent only when the link is
+clicked from that mailbox, and both halves are recorded as evidence.
+
+## Forms (admin, per brand)
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/brands/:id/forms` | with submission and confirmation counts |
+| `POST` | `/v1/brands/:id/forms` | returns the embed snippet |
+| `GET` | `/v1/brands/:id/forms/:fid` | |
+| `PATCH` | `/v1/brands/:id/forms/:fid` | |
+| `GET` | `/v1/brands/:id/forms/:fid/stats` | including the confirmation rate |
+| `GET` | `/v1/brands/:id/forms/:fid/submissions` | |
+
+```bash
+curl -X POST $BASE/v1/brands/$BRAND/forms -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{
+    "name": "Pricing page",
+    "fields": ["email", "first_name"],
+    "allowed_origins": ["https://scalaro.io", ".scalaro.io"],
+    "headline": "Get the newsletter",
+    "button_label": "Sign me up",
+    "theme": {"accent": "#9a7b4f", "radius": "6px"}
+  }'
+```
+
+`allowed_origins` is **required**. It is the list of sites that may post to
+this form, and an empty list accepts nothing — the form fails closed, because
+the alternative is a brand's list filled with whatever the internet feels like
+putting in it.
+
+A leading dot means "and its subdomains": `.scalaro.io` covers
+`app.scalaro.io` but **not** `notscalaro.io`.
+
+## Putting it on a site
+
+The create response hands you both lines:
+
+```html
+<div data-emk-form="<form-id>"></div>
+<script src="https://links.scalaro.io/f/<form-id>.js" async></script>
+```
+
+Without the `div` the form renders where the script tag sits, so one pasted
+line works.
+
+The widget is ~6 KB, has no dependencies and no build step. Everything is
+scoped to a per-form class, so the host site's CSS cannot flatten the form and
+the form cannot restyle the host site. It tolerates being loaded twice, which
+CMSs do.
+
+Customise with `theme`: `accent`, `radius`, `font`.
+
+## The flow
+
+```
+visitor submits        → form_submissions row, contact created as 'pending'
+                         (invisible to every campaign and automation)
+confirmation email     → queued like any other message: same rate limit, same
+                         tracking. Transactional, so no unsubscribe link —
+                         there is nothing to leave yet, and not clicking IS
+                         the opt-out
+visitor clicks         → GET /confirm/:token
+                         contact becomes 'subscribed', consent_at and
+                         consent_source recorded, tags applied, and any
+                         'subscribed' automation starts
+```
+
+Confirmation links are valid for **7 days** and are safe to click twice — mail
+clients prefetch, people double-click, and somebody will bookmark it.
+
+### Why GET confirms, when GET does not unsubscribe
+
+The opposite rules, deliberately. A scanner prefetching an unsubscribe link
+would empty the list; a scanner prefetching a confirmation link can only ever
+add somebody who already asked. And requiring a second click here loses real
+subscribers to confusion. The safe direction differs, so the design does.
+
+### Confirming after an unsubscribe
+
+They left, then filled in a form again and clicked a link in their own inbox.
+That is fresher and better-evidenced consent than the first time, so the
+brand-scoped unsubscribe is cleared.
+
+A **hard bounce or spam complaint is different** and is never cleared: that is
+global suppression, it protects the account every brand shares, and no form
+submission overrides it. Such an address is recorded as `blocked` and the
+visitor gets the ordinary success message — a different answer would turn a
+public form into a way to test who is on somebody's list.
+
+## Single opt-in
+
+`"double_optin": false` subscribes immediately. Available, and not
+recommended — see the top of this section.

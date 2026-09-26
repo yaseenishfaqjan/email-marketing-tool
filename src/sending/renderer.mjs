@@ -55,12 +55,14 @@ export function compileTemplate(mjml) {
   return html;
 }
 
-function substitute(template, contact, { escape }) {
+function substitute(template, contact, { escape, extraVars = {} }) {
   const values = {
     first_name: contact.first_name ?? '',
     last_name: contact.last_name ?? '',
     email: contact.email ?? '',
     ...Object.fromEntries(Object.entries(contact.attrs ?? {}).map(([k, v]) => [`attrs.${k}`, v])),
+    // Per-send values the contact does not carry, such as {{confirm_url}}.
+    ...extraVars,
   };
   return template.replace(/\{\{\s*([a-zA-Z0-9_.]{1,64})\s*\}\}/g, (whole, key) => {
     const v = values[key];
@@ -82,7 +84,11 @@ function rewriteLinks(html, messageId, base) {
     /<a\s([^>]*?)href="(https?:\/\/[^"]+)"([^>]*)>/gi,
     (whole, pre, url, post) => {
       if (/data-no-track/i.test(pre + post)) return whole;
-      if (url.startsWith(`${base}/u/`)) return whole;
+      // The two links that must work even if tracking is broken: unsubscribe,
+      // and the double opt-in confirmation. Routing either through the click
+      // tracker makes a legal obligation and every new subscriber depend on a
+      // subsystem that exists to count things.
+      if (url.startsWith(`${base}/u/`) || url.startsWith(`${base}/confirm/`)) return whole;
       const token = mint('c', { m: messageId, h: urlDigest(url) });
       const tracked = `${base}/c/${token}?u=${encodeURIComponent(url)}`;
       return `<a ${pre}href="${tracked}"${post}>`;
@@ -91,11 +97,15 @@ function rewriteLinks(html, messageId, base) {
 }
 
 function footer(brand, unsubUrl) {
+  // The postal address goes on every email, marketing or not. The unsubscribe
+  // link only makes sense where there is a subscription to leave.
+  const unsubscribe = unsubUrl
+    ? `<br><a href="${unsubUrl}" style="color:#8a8177;">Unsubscribe</a>`
+    : '';
   return `
   <div style="font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#8a8177;
               padding:24px 16px;text-align:center;">
-    ${escapeHtml(brand.postal_address)}<br>
-    <a href="${unsubUrl}" style="color:#8a8177;">Unsubscribe</a>
+    ${escapeHtml(brand.postal_address)}${unsubscribe}
   </div>`;
 }
 
@@ -129,16 +139,25 @@ function htmlToText(html) {
  * @param {string} args.messageId
  * @param {string} args.subject
  * @param {string} args.compiledHtml  output of compileTemplate()
- * @returns {{subject: string, html: string, text: string, unsubscribeUrl: string}}
+ * @param {boolean} [args.transactional]  a double opt-in confirmation or a
+ *   receipt: no unsubscribe link and no List-Unsubscribe header, because there
+ *   is no subscription to leave. For a confirmation in particular, NOT
+ *   clicking the link is itself the opt-out.
+ * @param {object} [args.extraVars]  merge values beyond the contact's own,
+ *   such as {{confirm_url}}.
+ * @returns {{subject: string, html: string, text: string, unsubscribeUrl: string|null}}
  */
-export function renderMessage({ brand, contact, messageId, subject, compiledHtml }) {
+export function renderMessage({
+  brand, contact, messageId, subject, compiledHtml, transactional = false, extraVars = {},
+}) {
   const base = trackingBase(brand);
-  const unsubscribeUrl = `${base}/u/${mint('u', { m: messageId })}`;
+  const unsubscribeUrl = transactional ? null : `${base}/u/${mint('u', { m: messageId })}`;
 
-  let html = substitute(compiledHtml, contact, { escape: true });
+  let html = substitute(compiledHtml, contact, { escape: true, extraVars });
   html = rewriteLinks(html, messageId, base);
 
-  const text = `${htmlToText(html)}\n\n--\n${brand.postal_address}\nUnsubscribe: ${unsubscribeUrl}`;
+  const text = `${htmlToText(html)}\n\n--\n${brand.postal_address}`
+    + (unsubscribeUrl ? `\nUnsubscribe: ${unsubscribeUrl}` : '');
 
   // The pixel goes last so a client that stops rendering early still counts
   // the body as read, and the footer is appended after link rewriting so the
@@ -152,7 +171,7 @@ export function renderMessage({ brand, contact, messageId, subject, compiledHtml
   }
 
   return {
-    subject: substitute(subject, contact, { escape: false }),
+    subject: substitute(subject, contact, { escape: false, extraVars }),
     html,
     text,
     unsubscribeUrl,

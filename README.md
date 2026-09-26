@@ -3,11 +3,12 @@
 One platform for all the businesses. Contacts, segments, broadcasts and
 deliverability, with hard separation between brands, sending through Amazon SES.
 
-**Phases 1 and 3 are complete and tested.** Sending: brands and API keys,
+**Phases 1, 3 and 4 are complete and tested.** Sending: brands and API keys,
 contacts, CSV import, segments, campaigns, the send pipeline, SES feedback
 handling, tracking, one-click unsubscribe. Automations: the events API each
 product calls, the scheduler, six step types, conditions over product
-behaviour. The form builder and the admin UI are still to come.
+behaviour. Forms: an embeddable widget, double opt-in, and the consent record
+behind it. The campaign composer and the admin UI are still to come.
 
 ```
 src/
@@ -18,6 +19,7 @@ src/
   tokens.mjs           signed unsubscribe / open / click tokens
   automations/         the engine, the step vocabulary, enrolment
   events/              recording what a product reports
+  forms/               signup forms, double opt-in, the embed widget
   contacts/            repository + CSV import
   segments/            the jsonb → SQL compiler
   campaigns/           materialise a campaign into message rows
@@ -50,7 +52,7 @@ Generate the two secrets:
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-`npm test` runs all 96 tests. The 37 that need a database skip cleanly without
+`npm test` runs all 114 tests. The 55 that need a database skip cleanly without
 one, so the suite is useful before Postgres is set up. See
 [test/README.md](test/README.md) for why they run serially.
 
@@ -110,6 +112,16 @@ POST does the work, and is also what Gmail's own unsubscribe button sends.
 and Yahoo have required one-click unsubscribe from bulk senders since February
 2024. Without it, good mail goes to spam whatever the content says.
 
+**A signup is not a subscriber.** Double opt-in is the default. A form
+submission is a claim — anybody can type anybody's address into a form on the
+open internet — and it becomes consent only when the link is clicked from that
+mailbox. Both halves are recorded, because consent you cannot evidence is
+consent you do not have.
+
+**Forms fail closed.** Every form carries an allowlist of sites that may post
+to it, and an empty list accepts nothing. The alternative is a brand's list
+filled with whatever the internet feels like putting in it.
+
 **The click tracker cannot be an open redirect.** Each click token carries a
 digest of the destination that was in the email. Without it,
 `/c/<token>?u=<anything>` would redirect from a domain your recipients have
@@ -130,8 +142,8 @@ changes.
 |---|---|---|
 | 1 | Contacts, imports, segments, campaigns, sending, SES feedback, tracking | **done** |
 | 3 | Automations engine + `/v1/events` from each product | **done** |
+| 4 | Form builder, embed script, double opt-in | **done** |
 | 2 | Campaign composer, template library, richer reporting | next |
-| 4 | Form builder, embed script, double opt-in | |
 | 5 | Migrate the brands, warm up, dashboards | |
 
 Phase 3 was built before Phase 2 because it is the one the whole platform is

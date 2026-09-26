@@ -12,12 +12,13 @@
 import { pathToFileURL } from 'node:url';
 import config from '../config.mjs';
 import { pool, query, tx, close } from '../db.mjs';
-import { compileTemplate, renderMessage } from '../sending/renderer.mjs';
+import { compileTemplate, renderMessage, trackingBase } from '../sending/renderer.mjs';
 import { buildMime } from '../sending/mime.mjs';
 import { sendRaw, classifyError } from '../sending/ses.mjs';
 import { TokenBucket } from '../sending/rate-limit.mjs';
 import { finaliseIfDone } from '../campaigns/materialise.mjs';
 import { tick as automationTick } from '../automations/engine.mjs';
+import { confirmUrl, DEFAULTS as FORM_DEFAULTS } from '../forms/repo.mjs';
 
 const MAX_ATTEMPTS = 5;
 const bucket = new TokenBucket(config.ses.maxSendRate);
@@ -56,9 +57,9 @@ const BRAND_COLUMNS = `b.name as brand_name, b.from_name, b.from_email, b.reply_
  * source of the subject and body differs.
  */
 async function loadMessageContext(message) {
-  const key = message.campaign_id
-    ? `campaign:${message.campaign_id}`
-    : `step:${message.automation_step_id}`;
+  const key = message.campaign_id ? `campaign:${message.campaign_id}`
+    : message.automation_step_id ? `step:${message.automation_step_id}`
+    : `form:${message.form_submission_id}`;
   if (templateCache.has(key)) return templateCache.get(key);
 
   let ctx = null;
@@ -95,9 +96,35 @@ async function loadMessageContext(message) {
         compiledHtml: compileTemplate(rows[0].config.mjml),
       };
     }
+  } else if (message.form_submission_id) {
+    // A double opt-in confirmation. Transactional: no unsubscribe link and no
+    // List-Unsubscribe header, because there is no subscription to leave yet —
+    // and NOT clicking the link is itself the opt-out.
+    const { rows } = await query(
+      `select sub.id as submission_id, f.id as form_id, f.name as form_name,
+              f.confirm_subject, f.confirm_mjml, f.brand_id, ${BRAND_COLUMNS}
+         from form_submissions sub
+         join forms f on f.id = sub.form_id
+         join brands b on b.id = f.brand_id
+        where sub.id = $1`,
+      [message.form_submission_id],
+    );
+    if (rows[0]) {
+      ctx = {
+        source: { kind: 'form', id: rows[0].form_id },
+        subject: rows[0].confirm_subject || FORM_DEFAULTS.DEFAULT_CONFIRM_SUBJECT,
+        brand: brandFrom(rows[0]),
+        compiledHtml: compileTemplate(rows[0].confirm_mjml || FORM_DEFAULTS.DEFAULT_CONFIRM_MJML),
+        transactional: true,
+        submissionId: rows[0].submission_id,
+      };
+    }
   }
 
-  if (ctx) templateCache.set(key, ctx);
+  // A confirmation is not cached: its body is identical, but the per-person
+  // confirm_url is not, and caching the compiled template alone would save
+  // nothing measurable on the handful of confirmations a form sends a minute.
+  if (ctx && !ctx.transactional) templateCache.set(key, ctx);
   return ctx;
 }
 
@@ -116,7 +143,7 @@ export async function claimBatch(limit) {
        from claimed
       where m.id = claimed.id
       returning m.id, m.campaign_id, m.automation_run_id, m.automation_step_id,
-                m.contact_id, m.brand_id, m.attempts`,
+                m.form_submission_id, m.contact_id, m.brand_id, m.attempts`,
     [limit],
   );
   return rows;
@@ -182,12 +209,27 @@ export async function processMessage(message) {
   // Re-check at send time, not only when the campaign was materialised. A big
   // broadcast can take an hour to drain, and an unsubscribe or a complaint
   // that lands in the middle of it must be honoured.
-  if (contact.status !== 'subscribed') return skip(message, `contact is ${contact.status}`);
-  const { rows: sup } = await query(
-    `select 1 from suppressions where email = $2 and (brand_id is null or brand_id = $1) limit 1`,
-    [message.brand_id, contact.email],
-  );
-  if (sup.length) return skip(message, 'suppressed');
+  //
+  // A double opt-in confirmation is the exception, and only a partial one. It
+  // goes to a 'pending' contact by definition, and to somebody re-subscribing
+  // after an unsubscribe — they have just asked for it, on a form, seconds
+  // ago. What it still obeys is GLOBAL suppression: a hard bounce or a spam
+  // complaint is about protecting the sending account, which every brand
+  // shares, and nothing overrides it.
+  if (ctx.transactional) {
+    const { rows: hard } = await query(
+      'select 1 from suppressions where email = $1 and brand_id is null limit 1',
+      [contact.email],
+    );
+    if (hard.length) return skip(message, 'globally suppressed');
+  } else {
+    if (contact.status !== 'subscribed') return skip(message, `contact is ${contact.status}`);
+    const { rows: sup } = await query(
+      `select 1 from suppressions where email = $2 and (brand_id is null or brand_id = $1) limit 1`,
+      [message.brand_id, contact.email],
+    );
+    if (sup.length) return skip(message, 'suppressed');
+  }
 
   const rendered = renderMessage({
     brand: ctx.brand,
@@ -195,6 +237,10 @@ export async function processMessage(message) {
     messageId: message.id,
     subject: ctx.subject,
     compiledHtml: ctx.compiledHtml,
+    transactional: Boolean(ctx.transactional),
+    extraVars: ctx.submissionId
+      ? { confirm_url: confirmUrl(trackingBase(ctx.brand), ctx.submissionId) }
+      : {},
   });
 
   const raw = buildMime({
@@ -208,7 +254,8 @@ export async function processMessage(message) {
     unsubscribeUrl: rendered.unsubscribeUrl,
     unsubscribeMailto: `unsubscribe@${ctx.brand.sending_domain}`,
     headers: {
-      [ctx.source.kind === 'campaign' ? 'X-Campaign-Id' : 'X-Automation-Id']: ctx.source.id,
+      [{ campaign: 'X-Campaign-Id', automation: 'X-Automation-Id', form: 'X-Form-Id' }[ctx.source.kind]]:
+        ctx.source.id,
       'X-Message-Id': message.id,
     },
   });

@@ -23,6 +23,8 @@ import campaigns from './http/routes/campaigns.mjs';
 import subscribe from './http/routes/subscribe.mjs';
 import events from './http/routes/events.mjs';
 import automations from './http/routes/automations.mjs';
+import formsAdmin from './http/routes/forms.mjs';
+import formPublic from './http/routes/form-public.mjs';
 
 export function createApp({ logErrors = true } = {}) {
   const app = express();
@@ -49,6 +51,11 @@ export function createApp({ logErrors = true } = {}) {
   // Public, token-signed: open pixel, click redirect, unsubscribe.
   app.use('/', tracking);
 
+  // Public signup forms: the embed script, the submit endpoint, the
+  // confirmation link. Mounted before the JSON parser sees them, because the
+  // submit route sets its own limit for a body that arrives from the open web.
+  app.use('/', formPublic);
+
   // Brand-scoped, API key: what each product calls.
   app.use('/v1', subscribe);
   app.use('/v1', events);
@@ -58,6 +65,7 @@ export function createApp({ logErrors = true } = {}) {
   app.use('/v1/brands/:brandId', contacts);
   app.use('/v1/brands/:brandId', campaigns);
   app.use('/v1/brands/:brandId', automations);
+  app.use('/v1/brands/:brandId', formsAdmin);
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
