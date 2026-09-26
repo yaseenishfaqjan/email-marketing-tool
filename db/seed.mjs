@@ -8,6 +8,7 @@
 
 import { query, close } from '../src/db.mjs';
 import { generateApiKey, hashApiKey } from '../src/tokens.mjs';
+import { installStarters } from '../src/templates/repo.mjs';
 
 const BRAND = {
   slug: 'demo',
@@ -31,6 +32,9 @@ const MJML = `<mjml>
 </mjml>`;
 
 async function seed() {
+  // Idempotent, and safe to run on every deploy.
+  console.log('starter templates:', await installStarters());
+
   const { rows: brands } = await query(
     `insert into brands (slug, name, from_name, from_email, sending_domain, postal_address)
      values ($1,$2,$3,$4,$5,$6)

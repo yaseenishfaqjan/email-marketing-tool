@@ -4,15 +4,15 @@
 npm test
 ```
 
-**114 tests.** The 55 that need PostgreSQL skip cleanly without one, so the suite
+**149 tests.** The 78 that need PostgreSQL skip cleanly without one, so the suite
 is useful before a database is set up:
 
 ```
-# pass 59
-# skipped 55
+# pass 71
+# skipped 78
 ```
 
-With a database (`createdb mailer && npm run migrate`) all 114 run.
+With a database (`createdb mailer && npm run migrate`) all 149 run.
 
 ## Why `--test-concurrency=1`
 
@@ -42,4 +42,6 @@ If the suite ever needs to be parallel, the fix is a schema per file
 | `integration.test.mjs` | **yes** | the send pipeline, bounces, idempotency |
 | `http.test.mjs` | **yes** | the public endpoints over real HTTP |
 | `automations.test.mjs` | **yes** | the automation engine end to end |
+| `lint.test.mjs` | no | the pre-send checks |
 | `forms.test.mjs` | **yes** | signup forms, double opt-in, and the abuse cases |
+| `composer.test.mjs` | **yes** | templates, preview, preheader, and the reports |

@@ -13,7 +13,8 @@
     "worker": "node src/worker/send-worker.mjs",
     "migrate": "node db/migrate.mjs",
     "seed": "node db/seed.mjs",
-    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "templates": "node -e \"import('./src/templates/repo.mjs').then(async m => { console.log('installed/updated:', await m.installStarters()); (await import('./src/db.mjs')).close(); })\""
   },
   "dependencies": {
     "@aws-sdk/client-sesv2": "^3.693.0",

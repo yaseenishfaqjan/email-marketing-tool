@@ -25,6 +25,8 @@ import events from './http/routes/events.mjs';
 import automations from './http/routes/automations.mjs';
 import formsAdmin from './http/routes/forms.mjs';
 import formPublic from './http/routes/form-public.mjs';
+import templates from './http/routes/templates.mjs';
+import reports from './http/routes/reports.mjs';
 
 export function createApp({ logErrors = true } = {}) {
   const app = express();
@@ -66,6 +68,8 @@ export function createApp({ logErrors = true } = {}) {
   app.use('/v1/brands/:brandId', campaigns);
   app.use('/v1/brands/:brandId', automations);
   app.use('/v1/brands/:brandId', formsAdmin);
+  app.use('/v1/brands/:brandId', templates);
+  app.use('/v1/brands/:brandId', reports);
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

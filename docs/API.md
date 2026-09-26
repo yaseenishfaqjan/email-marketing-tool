@@ -371,3 +371,142 @@ public form into a way to test who is on somebody's list.
 
 `"double_optin": false` subscribes immediately. Available, and not
 recommended — see the top of this section.
+
+---
+
+# Composer and reports (Phase 2)
+
+## Templates
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/brands/:id/templates` | brand's own + the starters. Bodies omitted |
+| `GET` | `/v1/brands/:id/templates/:tid` | with the MJML |
+| `POST` | `/v1/brands/:id/templates` | |
+| `POST` | `/v1/brands/:id/templates/:tid/copy` | |
+| `PATCH` | `/v1/brands/:id/templates/:tid` | |
+| `DELETE` | `/v1/brands/:id/templates/:tid` | |
+
+Four starters ship with the platform — a plain letter, an announcement, an
+onboarding step and a receipt. All single-column: multi-column email is where
+Outlook goes wrong, and on a phone the columns stack anyway, so the second
+column only ever costs you the rendering bug.
+
+Starters belong to no brand and **cannot be edited** — one brand editing one
+would change it for all five. Copy it, then edit the copy. Install or refresh
+them with `npm run templates` (idempotent, safe on every deploy).
+
+### Building a campaign from one
+
+```bash
+curl -X POST $BASE/v1/brands/$BRAND/campaigns -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{
+    "name": "October release",
+    "template_id": "<template-id>",
+    "subject": "Introducing scheduled sends",
+    "preheader": "Plus a faster editor."
+  }'
+```
+
+Anything omitted comes from the template.
+
+## Preview
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/brands/:id/campaigns/:cid/preview` | `{"contact_id": "..."}`, optional |
+| `POST` | `…/preview?format=html` | raw HTML, for an iframe |
+| `GET` | `/v1/brands/:id/campaigns/preview-contacts` | real contacts worth previewing against |
+
+**Preview against a real contact.** A template that looks right with "Ada" in
+it falls over on the row with no first name, and an imported list is full of
+those — so `preview-contacts` returns the nameless ones first.
+
+A preview renders with a message id of all zeroes, so its tracking links are
+valid but point at a row that does not exist. Previewing can never pollute a
+campaign's numbers.
+
+## The preheader
+
+The line Gmail and Apple Mail show next to the subject. Left unset, clients
+grab whatever text comes first — usually "View this email in your browser" —
+and that fragment is a big part of whether the message gets opened.
+
+It is injected as a hidden div at the top of the body, padded with zero-width
+joiners so the client stops scraping there instead of appending the first
+words of your actual copy.
+
+Set it on a campaign, or in an automation email step as `config.preheader`.
+
+## Lint — the pre-send check
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/brands/:id/campaigns/:cid/lint` | |
+
+It also runs automatically on send. **Errors block** — each one is something
+that cannot be undone once the campaign is out. **Warnings advise** and never
+block: this does not overrule the person writing the email. `?force=yes` on
+the send skips the check.
+
+### Errors
+
+| Code | |
+|---|---|
+| `subject_missing` | filtered before anybody sees it |
+| `mjml_invalid` | the template does not compile |
+| `local_link` | points at localhost or staging — dead for every recipient |
+| `unknown_merge_field` | `{{frist_name}}` renders as empty text, so the whole list gets "Hi ," |
+
+### Warnings
+
+`subject_long` · `subject_shouting` · `subject_punctuation` ·
+`preheader_missing` · `no_links` · `insecure_link` · `placeholder_link` ·
+`image_only` · `image_no_alt` · `bare_name_greeting`
+
+`bare_name_greeting` only fires when the brand's list *actually* contains
+contacts with no first name, and says how many. A rule that fires on every
+template is a rule nobody reads.
+
+## Reports
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/brands/:id/reports/deliverability?days=30` | **look at this one first** |
+| `GET` | `/v1/brands/:id/reports/growth?days=30` | where subscribers came from |
+| `GET` | `/v1/brands/:id/reports/campaigns/:cid` | rates for one campaign |
+| `GET` | `…/campaigns/:cid/links` | which links were clicked |
+| `GET` | `…/campaigns/:cid/timeline?hours=72` | opens and clicks by hour |
+| `GET` | `…/campaigns/:cid/providers` | Gmail vs Outlook vs the rest |
+
+### Deliverability health
+
+The report that keeps the sending account alive. SES reviews an account whose
+bounce rate passes **5%** or complaint rate passes **0.1%**, and pauses it at
+**10% / 0.5%** — for every brand at once, because the reputation is
+account-level.
+
+Each brand gets a verdict: `healthy` · `watch` · `at_risk` · `critical` ·
+`insufficient_data`. Below 200 sends it says `insufficient_data` rather than
+inventing a rate from four messages.
+
+Worth a weekly glance even when nothing seems wrong. By the time mail stops
+arriving, the account is already suspended.
+
+### Two rules behind every number
+
+**Rates are against delivered, not sent.** Against sent, a list full of dead
+addresses flatters itself: bounce 30% and the open rate still looks fine
+because the denominator counts mail nobody could receive.
+
+**Opens are reported, never optimised on.** Apple Mail Privacy Protection
+pre-fetches images for a large share of readers, registering an open whether
+or not anybody looked. `click_to_open` — of those who opened, how many acted —
+is the number worth moving.
+
+### Why the provider breakdown matters
+
+Gmail at 12% opens while Outlook sits at 2% is not a content problem. It is an
+authentication or reputation problem at one provider, and it is completely
+invisible in the overall rate. Domains with fewer than five recipients are
+omitted, because those rates would be noise.

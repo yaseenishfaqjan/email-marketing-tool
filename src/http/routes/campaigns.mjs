@@ -11,6 +11,8 @@ import express from 'express';
 import { query } from '../../db.mjs';
 import { requireAdmin, resolveBrand } from '../middleware/auth.mjs';
 import { materialiseCampaign, CampaignStateError } from '../../campaigns/materialise.mjs';
+import { lintCampaign } from '../../campaigns/lint.mjs';
+import { previewCampaign, sampleContacts } from '../../campaigns/preview.mjs';
 import { compileTemplate, renderMessage } from '../../sending/renderer.mjs';
 import { buildMime } from '../../sending/mime.mjs';
 import { sendRaw } from '../../sending/ses.mjs';
@@ -28,17 +30,107 @@ router.get('/campaigns', async (req, res) => {
 });
 
 router.post('/campaigns', async (req, res, next) => {
-  const { name, subject, mjml, preheader = null, segment_id = null } = req.body ?? {};
-  if (!name || !subject || !mjml) {
-    return res.status(400).json({ error: 'name, subject and mjml are required.' });
-  }
+  const { name, template_id = null, segment_id = null } = req.body ?? {};
+  let { subject, mjml, preheader = null } = req.body ?? {};
+
+  if (!name) return res.status(400).json({ error: 'A name is required.' });
+
   try {
+    // Starting from a template fills in whatever the request did not say, so
+    // "new campaign from the announcement template" is one call.
+    if (template_id) {
+      const { rows } = await query(
+        'select * from templates where id = $1 and (brand_id = $2 or is_starter)',
+        [template_id, req.brandId],
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Template not found.' });
+      mjml = mjml ?? rows[0].mjml;
+      subject = subject ?? rows[0].subject;
+      preheader = preheader ?? rows[0].preheader;
+    }
+
+    if (!subject || !mjml) {
+      return res.status(400).json({ error: 'subject and mjml are required (or give a template_id).' });
+    }
+
     const { rows } = await query(
-      `insert into campaigns (brand_id, name, subject, preheader, mjml, segment_id)
-       values ($1,$2,$3,$4,$5,$6) returning *`,
-      [req.brandId, name, subject, preheader, mjml, segment_id],
+      `insert into campaigns (brand_id, name, subject, preheader, mjml, segment_id, template_id)
+       values ($1,$2,$3,$4,$5,$6,$7) returning *`,
+      [req.brandId, name, subject, preheader, mjml, segment_id, template_id],
     );
     res.status(201).json({ campaign: rows[0] });
+  } catch (err) { next(err); }
+});
+
+/** The attribute names this brand's contacts actually carry, for the linter. */
+async function knownAttributes(brandId) {
+  const { rows } = await query(
+    `select distinct k from contacts c, lateral jsonb_object_keys(c.attrs) k
+      where c.brand_id = $1 limit 200`,
+    [brandId],
+  );
+  return rows.map((r) => r.k);
+}
+
+async function contactsMissingName(brandId) {
+  const { rows } = await query(
+    `select count(*)::int as n from contacts
+      where brand_id = $1 and status = 'subscribed' and (first_name is null or first_name = '')`,
+    [brandId],
+  );
+  return rows[0].n;
+}
+
+/**
+ * Render the campaign as a recipient would see it.
+ *
+ * Preview against a REAL contact where you can: a template that looks right
+ * with "Ada" in it falls over on the row with no first name, and an imported
+ * list is full of those.
+ */
+router.post('/campaigns/:id/preview', async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `select c.*, b.id as b_id, b.name as brand_name, b.from_name, b.from_email, b.reply_to,
+              b.postal_address, b.tracking_domain, b.sending_domain
+         from campaigns c join brands b on b.id = c.brand_id
+        where c.id = $1 and c.brand_id = $2`,
+      [req.params.id, req.brandId],
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+
+    const brand = { ...rows[0], id: rows[0].b_id, name: rows[0].brand_name };
+    const preview = await previewCampaign({
+      brand, campaign: rows[0], contactId: req.body?.contact_id ?? null,
+    });
+
+    // Plain HTML when asked for, so it can be dropped straight into an iframe.
+    if (req.query.format === 'html') {
+      res.type('html');
+      return res.send(preview.html);
+    }
+    res.json(preview);
+  } catch (err) { next(err); }
+});
+
+/** A few contacts worth previewing against — awkward ones first. */
+router.get('/campaigns/preview-contacts', async (req, res, next) => {
+  try {
+    res.json({ contacts: await sampleContacts(req.brandId, Number(req.query.limit) || 5) });
+  } catch (err) { next(err); }
+});
+
+/** What is wrong with this draft, before anybody else sees it. */
+router.post('/campaigns/:id/lint', async (req, res, next) => {
+  try {
+    const { rows } = await query('select * from campaigns where id = $1 and brand_id = $2',
+      [req.params.id, req.brandId]);
+    if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+
+    res.json(lintCampaign(rows[0], {
+      knownAttributes: await knownAttributes(req.brandId),
+      contactsMissingName: await contactsMissingName(req.brandId),
+    }));
   } catch (err) { next(err); }
 });
 
@@ -128,12 +220,35 @@ router.post('/campaigns/:id/test', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-/** Materialise now. The worker drains the queue. */
+/**
+ * Materialise now. The worker drains the queue.
+ *
+ * The linter runs first and its ERRORS block the send. Every one of them is
+ * something that cannot be undone once the campaign is out — a link pointing
+ * at localhost, a merge field that renders as empty text. Warnings do not
+ * block: this advises, it does not overrule the person writing the email.
+ * `?force=yes` skips the check for the case the linter got wrong.
+ */
 router.post('/campaigns/:id/send', async (req, res, next) => {
   try {
-    const { rows } = await query('select id from campaigns where id = $1 and brand_id = $2',
+    const { rows } = await query('select * from campaigns where id = $1 and brand_id = $2',
       [req.params.id, req.brandId]);
     if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+
+    if (req.query.force !== 'yes') {
+      const lint = lintCampaign(rows[0], {
+        knownAttributes: await knownAttributes(req.brandId),
+        contactsMissingName: await contactsMissingName(req.brandId),
+      });
+      if (!lint.ok) {
+        return res.status(422).json({
+          error: 'This campaign has problems that cannot be undone once it is sent.',
+          errors: lint.errors,
+          warnings: lint.warnings,
+          hint: 'Fix them, or add ?force=yes if you are sure.',
+        });
+      }
+    }
 
     const { recipients } = await materialiseCampaign(req.params.id);
     res.json({ recipients, status: recipients > 0 ? 'sending' : 'sent' });

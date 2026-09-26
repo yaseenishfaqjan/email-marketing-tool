@@ -96,6 +96,29 @@ function rewriteLinks(html, messageId, base) {
   );
 }
 
+/**
+ * The preheader: the line Gmail and Apple Mail show next to the subject.
+ *
+ * Left unset, clients grab whatever text comes first — usually "View this
+ * email in your browser" or a stray alt attribute — and that fragment is a
+ * big part of whether the message gets opened at all.
+ *
+ * It goes in a hidden div at the very top of the body, followed by a run of
+ * zero-width joiners. Without that padding the client keeps scraping and
+ * appends the first words of the real body, so the preview becomes the
+ * preheader plus half a sentence.
+ */
+function injectPreheader(html, text) {
+  if (!text) return html;
+  const block = `<div style="display:none;max-height:0;overflow:hidden;`
+    + `mso-hide:all;font-size:1px;line-height:1px;color:#ffffff;opacity:0;">`
+    + `${text}${'&#8204;&nbsp;'.repeat(60)}</div>`;
+
+  // MJML output always has a <body>; the fallback covers a hand-written template.
+  if (/<body[^>]*>/i.test(html)) return html.replace(/(<body[^>]*>)/i, `$1${block}`);
+  return block + html;
+}
+
 function footer(brand, unsubUrl) {
   // The postal address goes on every email, marketing or not. The unsubscribe
   // link only makes sense where there is a subscription to leave.
@@ -139,6 +162,8 @@ function htmlToText(html) {
  * @param {string} args.messageId
  * @param {string} args.subject
  * @param {string} args.compiledHtml  output of compileTemplate()
+ * @param {string} [args.preheader]  the line the inbox shows next to the
+ *   subject. Hidden in the message body itself.
  * @param {boolean} [args.transactional]  a double opt-in confirmation or a
  *   receipt: no unsubscribe link and no List-Unsubscribe header, because there
  *   is no subscription to leave. For a confirmation in particular, NOT
@@ -148,12 +173,14 @@ function htmlToText(html) {
  * @returns {{subject: string, html: string, text: string, unsubscribeUrl: string|null}}
  */
 export function renderMessage({
-  brand, contact, messageId, subject, compiledHtml, transactional = false, extraVars = {},
+  brand, contact, messageId, subject, compiledHtml, preheader = null,
+  transactional = false, extraVars = {},
 }) {
   const base = trackingBase(brand);
   const unsubscribeUrl = transactional ? null : `${base}/u/${mint('u', { m: messageId })}`;
 
   let html = substitute(compiledHtml, contact, { escape: true, extraVars });
+  html = injectPreheader(html, substitute(preheader ?? '', contact, { escape: true, extraVars }));
   html = rewriteLinks(html, messageId, base);
 
   const text = `${htmlToText(html)}\n\n--\n${brand.postal_address}`
@@ -178,4 +205,4 @@ export function renderMessage({
   };
 }
 
-export const _internals = { escapeHtml, substitute, rewriteLinks, htmlToText };
+export const _internals = { escapeHtml, substitute, rewriteLinks, htmlToText, injectPreheader };

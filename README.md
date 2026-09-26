@@ -3,12 +3,14 @@
 One platform for all the businesses. Contacts, segments, broadcasts and
 deliverability, with hard separation between brands, sending through Amazon SES.
 
-**Phases 1, 3 and 4 are complete and tested.** Sending: brands and API keys,
-contacts, CSV import, segments, campaigns, the send pipeline, SES feedback
-handling, tracking, one-click unsubscribe. Automations: the events API each
-product calls, the scheduler, six step types, conditions over product
-behaviour. Forms: an embeddable widget, double opt-in, and the consent record
-behind it. The campaign composer and the admin UI are still to come.
+**Phases 1 through 4 are complete and tested** — the whole platform except the
+admin UI. Sending: brands and API keys, contacts, CSV import, segments,
+campaigns, the send pipeline, SES feedback handling, tracking, one-click
+unsubscribe. Automations: the events API each product calls, the scheduler,
+six step types, conditions over product behaviour. Forms: an embeddable
+widget, double opt-in, and the consent record behind it. Composer: a template
+library, preview against real contacts, a pre-send linter, and the reports
+that keep the sending account alive.
 
 ```
 src/
@@ -20,9 +22,11 @@ src/
   automations/         the engine, the step vocabulary, enrolment
   events/              recording what a product reports
   forms/               signup forms, double opt-in, the embed widget
+  templates/           the library, and the four starters
+  reporting/           deliverability health, campaign and list reports
   contacts/            repository + CSV import
   segments/            the jsonb → SQL compiler
-  campaigns/           materialise a campaign into message rows
+  campaigns/           materialise, preview, and the pre-send linter
   sending/             SES client, MIME builder, renderer, rate limiter
   suppression/         per-brand and global
   http/                routes, auth, SNS signature verification
@@ -52,7 +56,7 @@ Generate the two secrets:
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-`npm test` runs all 114 tests. The 55 that need a database skip cleanly without
+`npm test` runs all 149 tests. The 78 that need a database skip cleanly without
 one, so the suite is useful before Postgres is set up. See
 [test/README.md](test/README.md) for why they run serially.
 
@@ -112,6 +116,17 @@ POST does the work, and is also what Gmail's own unsubscribe button sends.
 and Yahoo have required one-click unsubscribe from bulk senders since February
 2024. Without it, good mail goes to spam whatever the content says.
 
+**Nothing that cannot be undone ships without a check.** A linter runs before
+every send. Its errors block — a link pointing at staging, a merge field
+that renders as empty text so the whole list gets "Hi ,". Its warnings advise
+and never block, because a linter that overrules the person writing the email
+is a linter they route around.
+
+**Rates are measured against delivered, not sent.** Against sent, a list full
+of dead addresses flatters itself. And opens are reported but never optimised
+on: Apple Mail Privacy Protection pre-fetches images, so an open means someone
+*might* have looked. Clicks are the honest number.
+
 **A signup is not a subscriber.** Double opt-in is the default. A form
 submission is a claim — anybody can type anybody's address into a form on the
 open internet — and it becomes consent only when the link is clicked from that
@@ -143,8 +158,8 @@ changes.
 | 1 | Contacts, imports, segments, campaigns, sending, SES feedback, tracking | **done** |
 | 3 | Automations engine + `/v1/events` from each product | **done** |
 | 4 | Form builder, embed script, double opt-in | **done** |
-| 2 | Campaign composer, template library, richer reporting | next |
-| 5 | Migrate the brands, warm up, dashboards | |
+| 2 | Campaign composer, template library, richer reporting | **done** |
+| 5 | Migrate the brands, warm up, dashboards | next |
 
 Phase 3 was built before Phase 2 because it is the one the whole platform is
 for: each product posts its own lifecycle events — `trial_started`,

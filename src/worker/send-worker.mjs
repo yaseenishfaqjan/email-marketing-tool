@@ -66,7 +66,7 @@ async function loadMessageContext(message) {
 
   if (message.campaign_id) {
     const { rows } = await query(
-      `select c.id, c.subject, c.mjml, c.brand_id, ${BRAND_COLUMNS}
+      `select c.id, c.subject, c.mjml, c.preheader, c.brand_id, ${BRAND_COLUMNS}
          from campaigns c join brands b on b.id = c.brand_id
         where c.id = $1`,
       [message.campaign_id],
@@ -75,6 +75,7 @@ async function loadMessageContext(message) {
       ctx = {
         source: { kind: 'campaign', id: rows[0].id },
         subject: rows[0].subject,
+        preheader: rows[0].preheader,
         brand: brandFrom(rows[0]),
         compiledHtml: compileTemplate(rows[0].mjml),
       };
@@ -92,6 +93,7 @@ async function loadMessageContext(message) {
       ctx = {
         source: { kind: 'automation', id: rows[0].automation_id, stepId: rows[0].id },
         subject: rows[0].config.subject,
+        preheader: rows[0].config.preheader ?? null,
         brand: brandFrom(rows[0]),
         compiledHtml: compileTemplate(rows[0].config.mjml),
       };
@@ -236,6 +238,7 @@ export async function processMessage(message) {
     contact,
     messageId: message.id,
     subject: ctx.subject,
+    preheader: ctx.preheader ?? null,
     compiledHtml: ctx.compiledHtml,
     transactional: Boolean(ctx.transactional),
     extraVars: ctx.submissionId
