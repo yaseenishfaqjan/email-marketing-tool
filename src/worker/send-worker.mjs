@@ -17,42 +17,87 @@ import { buildMime } from '../sending/mime.mjs';
 import { sendRaw, classifyError } from '../sending/ses.mjs';
 import { TokenBucket } from '../sending/rate-limit.mjs';
 import { finaliseIfDone } from '../campaigns/materialise.mjs';
+import { tick as automationTick } from '../automations/engine.mjs';
 
 const MAX_ATTEMPTS = 5;
 const bucket = new TokenBucket(config.ses.maxSendRate);
 
 let running = true;
 
-/** Compiled MJML, keyed by campaign. Compiling per recipient would dominate the send. */
+/**
+ * Compiled MJML, keyed by campaign or automation step.
+ *
+ * Compiling MJML takes tens of milliseconds and produces identical output for
+ * every recipient. At 50,000 recipients, caching it is the difference between
+ * a send that takes minutes and one that takes an hour.
+ */
 const templateCache = new Map();
 
-async function loadCampaignContext(campaignId) {
-  if (templateCache.has(campaignId)) return templateCache.get(campaignId);
-  const { rows } = await query(
-    `select c.id, c.subject, c.mjml, c.brand_id,
-            b.name as brand_name, b.from_name, b.from_email, b.reply_to,
-            b.postal_address, b.tracking_domain, b.ses_config_set, b.sending_domain
-       from campaigns c join brands b on b.id = c.brand_id
-      where c.id = $1`,
-    [campaignId],
-  );
-  if (!rows[0]) return null;
-  const ctx = {
-    campaign: rows[0],
-    brand: {
-      id: rows[0].brand_id,
-      name: rows[0].brand_name,
-      from_name: rows[0].from_name,
-      from_email: rows[0].from_email,
-      reply_to: rows[0].reply_to,
-      postal_address: rows[0].postal_address,
-      tracking_domain: rows[0].tracking_domain,
-      ses_config_set: rows[0].ses_config_set,
-      sending_domain: rows[0].sending_domain,
-    },
-    compiledHtml: compileTemplate(rows[0].mjml),
-  };
-  templateCache.set(campaignId, ctx);
+const brandFrom = (row) => ({
+  id: row.brand_id,
+  name: row.brand_name,
+  from_name: row.from_name,
+  from_email: row.from_email,
+  reply_to: row.reply_to,
+  postal_address: row.postal_address,
+  tracking_domain: row.tracking_domain,
+  ses_config_set: row.ses_config_set,
+  sending_domain: row.sending_domain,
+});
+
+const BRAND_COLUMNS = `b.name as brand_name, b.from_name, b.from_email, b.reply_to,
+       b.postal_address, b.tracking_domain, b.ses_config_set, b.sending_domain`;
+
+/**
+ * Everything needed to render one message, whatever produced it.
+ *
+ * A campaign send and an automation send are the same thing downstream: same
+ * queue, same rate limit, same suppression re-check, same tracking. Only the
+ * source of the subject and body differs.
+ */
+async function loadMessageContext(message) {
+  const key = message.campaign_id
+    ? `campaign:${message.campaign_id}`
+    : `step:${message.automation_step_id}`;
+  if (templateCache.has(key)) return templateCache.get(key);
+
+  let ctx = null;
+
+  if (message.campaign_id) {
+    const { rows } = await query(
+      `select c.id, c.subject, c.mjml, c.brand_id, ${BRAND_COLUMNS}
+         from campaigns c join brands b on b.id = c.brand_id
+        where c.id = $1`,
+      [message.campaign_id],
+    );
+    if (rows[0]) {
+      ctx = {
+        source: { kind: 'campaign', id: rows[0].id },
+        subject: rows[0].subject,
+        brand: brandFrom(rows[0]),
+        compiledHtml: compileTemplate(rows[0].mjml),
+      };
+    }
+  } else if (message.automation_step_id) {
+    const { rows } = await query(
+      `select s.id, s.config, a.id as automation_id, a.brand_id, ${BRAND_COLUMNS}
+         from automation_steps s
+         join automations a on a.id = s.automation_id
+         join brands b on b.id = a.brand_id
+        where s.id = $1`,
+      [message.automation_step_id],
+    );
+    if (rows[0]?.config?.mjml) {
+      ctx = {
+        source: { kind: 'automation', id: rows[0].automation_id, stepId: rows[0].id },
+        subject: rows[0].config.subject,
+        brand: brandFrom(rows[0]),
+        compiledHtml: compileTemplate(rows[0].config.mjml),
+      };
+    }
+  }
+
+  if (ctx) templateCache.set(key, ctx);
   return ctx;
 }
 
@@ -70,7 +115,8 @@ export async function claimBatch(limit) {
         set status = 'sending', attempts = m.attempts + 1, locked_at = now()
        from claimed
       where m.id = claimed.id
-      returning m.id, m.campaign_id, m.contact_id, m.brand_id, m.attempts`,
+      returning m.id, m.campaign_id, m.automation_run_id, m.automation_step_id,
+                m.contact_id, m.brand_id, m.attempts`,
     [limit],
   );
   return rows;
@@ -123,8 +169,8 @@ async function skip(message, reason) {
 }
 
 export async function processMessage(message) {
-  const ctx = await loadCampaignContext(message.campaign_id);
-  if (!ctx) return markFailed(message, 'campaign or brand missing');
+  const ctx = await loadMessageContext(message);
+  if (!ctx) return markFailed(message, 'the campaign, automation step or brand is missing');
 
   const { rows } = await query(
     'select id, email, first_name, last_name, status, attrs from contacts where id = $1',
@@ -147,7 +193,7 @@ export async function processMessage(message) {
     brand: ctx.brand,
     contact,
     messageId: message.id,
-    subject: ctx.campaign.subject,
+    subject: ctx.subject,
     compiledHtml: ctx.compiledHtml,
   });
 
@@ -161,7 +207,10 @@ export async function processMessage(message) {
     html: rendered.html,
     unsubscribeUrl: rendered.unsubscribeUrl,
     unsubscribeMailto: `unsubscribe@${ctx.brand.sending_domain}`,
-    headers: { 'X-Campaign-Id': ctx.campaign.id, 'X-Message-Id': message.id },
+    headers: {
+      [ctx.source.kind === 'campaign' ? 'X-Campaign-Id' : 'X-Automation-Id']: ctx.source.id,
+      'X-Message-Id': message.id,
+    },
   });
 
   await bucket.take();
@@ -243,9 +292,9 @@ export async function startDueCampaigns() {
 }
 
 async function main() {
-  console.log('[worker] started — rate %d/s, batch %d%s',
+  console.log('[worker] started — sending at %d/s in batches of %d, automations every pass%s',
     config.ses.maxSendRate, config.worker.batchSize,
-    config.ses.sandbox ? ', SES SANDBOX' : '');
+    config.ses.sandbox ? ' — SES SANDBOX' : '');
 
   let sinceHousekeeping = 0;
 
@@ -255,8 +304,20 @@ async function main() {
         await recoverStuck();
         await startDueCampaigns();
       }
+
+      // Automations advance first. A wait that expired needs to queue its
+      // email before this pass drains the queue, or it sits idle until the
+      // next one -- which at a two-second poll nobody notices, but at a slow
+      // poll on a quiet night is an hour's delay on a trial-expiry email.
+      const auto = await automationTick();
+      if (auto.processed) {
+        console.log('[worker] automations: %d step(s) %j', auto.processed, auto.actions);
+      }
+
       const n = await tick();
-      if (n === 0) await new Promise((r) => setTimeout(r, config.worker.pollMs));
+      if (n === 0 && auto.processed === 0) {
+        await new Promise((r) => setTimeout(r, config.worker.pollMs));
+      }
     } catch (err) {
       console.error('[worker] loop error:', err.message);
       await new Promise((r) => setTimeout(r, 5000));

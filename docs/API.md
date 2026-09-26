@@ -129,3 +129,138 @@ response would make this endpoint a way to test whether somebody complained.
 | `GET` | `/u/:token` | Shows a confirmation page. **Does not unsubscribe** |
 | `POST` | `/u/:token` | Unsubscribes. Also the one-click target |
 | `POST` | `/webhooks/ses` | SNS. Signature verified |
+
+---
+
+# Automations (Phase 3)
+
+## Events (brand API key)
+
+The endpoint each product calls. This is what the platform was built for: the
+product's real state drives the email, instead of a guess.
+
+```bash
+curl -X POST $BASE/v1/events -H "Authorization: Bearer $BRAND_KEY" \
+  -H 'Content-Type: application/json' -d '{
+    "email": "dev@company.com",
+    "event": "trial_started",
+    "properties": {"plan": "pro", "seats": 5},
+    "idempotency_key": "trial-9281"
+  }'
+```
+
+| Field | |
+|---|---|
+| `email` | who did it |
+| `event` | the event name, e.g. `trial_started` |
+| `properties` | anything; segmentable and usable as merge fields |
+| `idempotency_key` | optional but **use it**. A retried webhook is ignored rather than firing the sequence twice |
+| `subscribe` | see below |
+| `create_contact` | `false` to ignore events from people not on the list |
+
+### Consent
+
+An unknown address is created as **`pending`** and enters no sequence — doing
+something in an app is not consent to receive marketing email.
+
+If the product *did* collect consent, say so, and say where:
+
+```json
+{ "email": "dev@company.com",
+  "event": "trial_started",
+  "subscribe": { "consent_source": "Signed up at app.scalaro.io/register" } }
+```
+
+That records `consent_at` and `consent_source`, and the contact becomes
+`subscribed`. Consent you cannot evidence is consent you do not have.
+
+It only ever moves `pending` → `subscribed`. Somebody who unsubscribed stays
+unsubscribed whatever a product asserts — that decision is theirs.
+
+### Other event routes
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/events/batch` | up to 500 at once, for a product catching up after downtime |
+| `GET` | `/v1/events?email=&event=&limit=` | the audit trail behind "why did they get this?" |
+
+## Automations (admin, per brand)
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/brands/:id/automations` | with step and active-run counts |
+| `POST` | `/v1/brands/:id/automations` | name, trigger, steps |
+| `GET` | `/v1/brands/:id/automations/:aid` | with its steps |
+| `PUT` | `/v1/brands/:id/automations/:aid/steps` | replaces the sequence wholesale |
+| `POST` | `/v1/brands/:id/automations/:aid/activate` | |
+| `POST` | `/v1/brands/:id/automations/:aid/pause` | holds runs, never cancels them |
+| `POST` | `/v1/brands/:id/automations/:aid/enrol` | by hand, for a manual trigger or a test |
+| `GET` | `/v1/brands/:id/automations/:aid/stats` | runs by state, plus per-step engagement |
+
+### Triggers
+
+| `trigger_type` | `trigger_config` |
+|---|---|
+| `event` | `{"event": "trial_started"}`, optionally `{"match": {"plan": "pro"}}` |
+| `tag_added` | `{"tag": "pricing-page"}` |
+| `subscribed` | `{}`, or `{"source": "pricing-page"}` for a per-form welcome |
+| `manual` | `{}` — enrol through the API |
+
+`match` lets one event name drive several sequences: a pro onboarding and a
+free onboarding off the same `purchase`.
+
+### Steps
+
+| Type | Config |
+|---|---|
+| `wait` | `{"days": 3}` / `{"hours": 48}` / `{"minutes": 30}` |
+| `email` | `{"subject": "...", "mjml": "..."}` — merge fields work |
+| `condition` | `{"rules": <segment>, "otherwise": "exit" \| "continue"}` |
+| `add_tag` / `remove_tag` | `{"tag": "trial-nudged"}` |
+| `webhook` | `{"url": "https://...", "payload": {}}` — https only |
+| `exit` | `{}` |
+
+Steps are validated when **saved**. A broken rule found at 3am mid-sequence is
+a stuck run and a customer who never hears from you again.
+
+### Re-entry
+
+`re_entry: false` (default) — a welcome series must never repeat.
+`re_entry: true` with `re_entry_cooldown_hours` — an abandoned-checkout series
+must.
+
+Either way only **one active run** per person per automation, so a
+double-fired event cannot put somebody through the sequence twice at once.
+
+### Worked example — the trial-activation flow
+
+```json
+{
+  "name": "Trial activation",
+  "trigger_type": "event",
+  "trigger_config": { "event": "trial_started" },
+  "steps": [
+    { "type": "wait", "config": { "hours": 48 } },
+    { "type": "condition",
+      "config": { "rules": { "rules": [
+        { "field": "event", "op": "not_has", "value": "feature_used" } ] },
+        "otherwise": "exit" } },
+    { "type": "email",
+      "config": { "subject": "Need a hand getting started?",
+                  "mjml": "<mjml>…</mjml>" } }
+  ]
+}
+```
+
+Started a trial, hasn't used the product after two days → nudge. Already
+active → the condition exits and they hear nothing. That is the difference
+between a helpful email and an annoying one.
+
+### Segment rules gained an `event` field
+
+Usable in segments and in `condition` steps alike:
+
+```json
+{ "field": "event", "op": "has" | "not_has",
+  "value": "feature_used", "within_days": 7 }
+```

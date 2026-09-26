@@ -11,6 +11,7 @@ import { requireApiKey } from '../middleware/auth.mjs';
 import * as contacts from '../../contacts/repo.mjs';
 import * as suppression from '../../suppression/repo.mjs';
 import { query } from '../../db.mjs';
+import { onSubscribed, onTagAdded } from '../../automations/enrol.mjs';
 
 const router = express.Router();
 
@@ -68,18 +69,33 @@ router.post('/subscribe', requireApiKey('subscribe'), rateLimit, async (req, res
       attrs: typeof body.attrs === 'object' && body.attrs ? body.attrs : {},
     });
 
+    const tagNames = [];
     if (Array.isArray(body.tags) && body.tags.length) {
       for (const name of body.tags.slice(0, 10)) {
+        const tagName = String(name).slice(0, 64);
         const { rows } = await query(
           `insert into tags (brand_id, name) values ($1,$2)
            on conflict (brand_id, name) do update set name = excluded.name returning id`,
-          [req.brandId, String(name).slice(0, 64)],
+          [req.brandId, tagName],
         );
         await contacts.addTag(req.brandId, contact.id, rows[0].id);
+        tagNames.push(tagName);
       }
     }
 
     res.status(201).json({ ok: true, status: contact.status });
+
+    // Answer first, then enrol. A slow automation lookup must never make the
+    // signup form on somebody's pricing page feel broken, and the response
+    // carries nothing that depends on the outcome.
+    if (contact.status === 'subscribed') {
+      onSubscribed({ brandId: req.brandId, contactId: contact.id, source: body.source ?? 'api' })
+        .catch((err) => console.error('[subscribe] enrolment failed: %s', err.message));
+      for (const tagName of tagNames) {
+        onTagAdded({ brandId: req.brandId, contactId: contact.id, tagName })
+          .catch((err) => console.error('[subscribe] tag enrolment failed: %s', err.message));
+      }
+    }
   } catch (err) { next(err); }
 });
 

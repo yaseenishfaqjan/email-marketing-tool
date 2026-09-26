@@ -21,6 +21,8 @@ import brands from './http/routes/brands.mjs';
 import contacts from './http/routes/contacts.mjs';
 import campaigns from './http/routes/campaigns.mjs';
 import subscribe from './http/routes/subscribe.mjs';
+import events from './http/routes/events.mjs';
+import automations from './http/routes/automations.mjs';
 
 export function createApp({ logErrors = true } = {}) {
   const app = express();
@@ -47,13 +49,15 @@ export function createApp({ logErrors = true } = {}) {
   // Public, token-signed: open pixel, click redirect, unsubscribe.
   app.use('/', tracking);
 
-  // Brand-scoped, API key.
+  // Brand-scoped, API key: what each product calls.
   app.use('/v1', subscribe);
+  app.use('/v1', events);
 
   // Admin.
   app.use('/v1/brands', brands);
   app.use('/v1/brands/:brandId', contacts);
   app.use('/v1/brands/:brandId', campaigns);
+  app.use('/v1/brands/:brandId', automations);
 
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 

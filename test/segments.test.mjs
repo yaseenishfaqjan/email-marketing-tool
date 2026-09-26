@@ -68,3 +68,29 @@ test('a rule count that would blow up the query planner is refused', () => {
   const rules = Array.from({ length: 51 }, () => ({ field: 'status', op: 'eq', value: 'subscribed' }));
   assert.throws(() => compileSegment({ rules }), SegmentError);
 });
+
+test('event rules become an EXISTS against the events table', () => {
+  // This is the rule that makes behavioural automations possible: trial
+  // started but the feature was never used.
+  const { sql, params } = compileSegment({
+    rules: [{ field: 'event', op: 'not_has', value: 'feature_used' }],
+  });
+  assert.match(sql, /not exists \(select 1 from events e/);
+  assert.equal(params[0], 'feature_used');
+});
+
+test('an event rule can be limited to a time window', () => {
+  const { sql, params } = compileSegment({
+    rules: [{ field: 'event', op: 'has', value: 'purchase', within_days: 30 }],
+  });
+  assert.match(sql, /e\.at > now\(\)/);
+  assert.deepEqual(params, ['30', 'purchase']);
+});
+
+test('a malformed event rule is refused', () => {
+  assert.throws(() => compileSegment({ rules: [{ field: 'event', op: 'has' }] }), SegmentError);
+  assert.throws(() => compileSegment({ rules: [{ field: 'event', op: 'maybe', value: 'x' }] }), SegmentError);
+  assert.throws(() => compileSegment({
+    rules: [{ field: 'event', op: 'has', value: 'x', within_days: "1'; drop table events; --" }],
+  }), SegmentError);
+});

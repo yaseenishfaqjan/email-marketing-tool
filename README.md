@@ -3,10 +3,11 @@
 One platform for all the businesses. Contacts, segments, broadcasts and
 deliverability, with hard separation between brands, sending through Amazon SES.
 
-**Phase 1 is complete and tested:** brands and API keys, contacts, CSV import,
-segments, campaigns, the send pipeline, SES feedback handling, open and click
-tracking, and one-click unsubscribe. Automations, the form builder and the
-admin UI are Phases 3–4 — see [the plan](#where-this-is-going).
+**Phases 1 and 3 are complete and tested.** Sending: brands and API keys,
+contacts, CSV import, segments, campaigns, the send pipeline, SES feedback
+handling, tracking, one-click unsubscribe. Automations: the events API each
+product calls, the scheduler, six step types, conditions over product
+behaviour. The form builder and the admin UI are still to come.
 
 ```
 src/
@@ -15,6 +16,8 @@ src/
   config.mjs           validated at startup; missing secrets fail the process
   db.mjs               pool, query, tx
   tokens.mjs           signed unsubscribe / open / click tokens
+  automations/         the engine, the step vocabulary, enrolment
+  events/              recording what a product reports
   contacts/            repository + CSV import
   segments/            the jsonb → SQL compiler
   campaigns/           materialise a campaign into message rows
@@ -47,8 +50,9 @@ Generate the two secrets:
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-`npm test` runs all 71 tests. The 23 that need a database skip cleanly without
-one, so the suite is useful before Postgres is set up.
+`npm test` runs all 96 tests. The 37 that need a database skip cleanly without
+one, so the suite is useful before Postgres is set up. See
+[test/README.md](test/README.md) for why they run serially.
 
 ## Before it can send anything
 
@@ -125,12 +129,46 @@ changes.
 | Phase | | Status |
 |---|---|---|
 | 1 | Contacts, imports, segments, campaigns, sending, SES feedback, tracking | **done** |
+| 3 | Automations engine + `/v1/events` from each product | **done** |
 | 2 | Campaign composer, template library, richer reporting | next |
-| 3 | Automations engine + `/v1/events` from each product | |
 | 4 | Form builder, embed script, double opt-in | |
 | 5 | Migrate the brands, warm up, dashboards | |
 
-Phase 3 is the one the whole platform is for: each product posts its own
-lifecycle events — `trial_started`, `trial_expiring`, `upgraded` — and the
-emails follow from the product's real state rather than from a guess. A rented
-ESP can only ever react to what you remember to forward it.
+Phase 3 was built before Phase 2 because it is the one the whole platform is
+for: each product posts its own lifecycle events — `trial_started`,
+`trial_expiring`, `upgraded` — and the emails follow from the product's real
+state rather than from a guess. A rented ESP can only ever react to what you
+remember to forward it.
+
+## How an automation runs
+
+```
+POST /v1/events  ── trial_started ──▶ enrol (one active run per person)
+                                          │
+        ┌─────────────────────────────────▼──────────────────────────────┐
+        │  automation_runs: one row per person, with a next_run_at        │
+        │  scheduler: SELECT … WHERE next_run_at <= now()                 │
+        │             FOR UPDATE SKIP LOCKED                              │
+        └─────────────────────────────────┬──────────────────────────────┘
+                                          │ one step per tick
+             wait ──▶ condition ──▶ email ──▶ … ──▶ completed
+                                          │
+                                          ▼
+                        messages ── the same queue broadcasts use
+```
+
+The scheduler is a Postgres poll, not a pile of delayed jobs. A three-day wait
+parked inside a job queue is invisible and gone the moment somebody flushes it;
+a row with a `next_run_at` can be inspected, counted and rescheduled.
+`SKIP LOCKED` is what lets several workers share the table without anybody
+being processed twice.
+
+Two things stop the classic failures. A partial unique index allows only **one
+active run** per person per automation, so a double-fired event cannot start
+the sequence twice. Another on `(automation_run_id, automation_step_id)` means
+a step re-executed after a crash **cannot send a second copy** — the same
+trick the broadcast pipeline uses with `(campaign_id, contact_id)`.
+
+Subscriber status is re-checked at **every step**, not only at enrolment. Most
+of a drip series happens days after somebody joined it, and the person who
+unsubscribed on Tuesday must not get Thursday's email.

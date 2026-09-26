@@ -63,11 +63,19 @@ async function fixture(slug) {
      values ($1,$2,'Test','subscribed','test') returning *`,
     [brand.id, `${slug}@http.test.example`],
   );
-  const { rows: [message] } = await query(
-    'insert into messages (brand_id, contact_id, status) values ($1,$2,$3) returning *',
-    [brand.id, contact.id, 'sent'],
+  // Every message belongs to a campaign or an automation -- the schema enforces
+  // it -- so the fixture builds a real campaign rather than a source-less row.
+  const { rows: [campaign] } = await query(
+    `insert into campaigns (brand_id, name, subject, mjml)
+     values ($1,'Fixture','Subject','<mjml><mj-body><mj-section><mj-column><mj-text>Hi</mj-text></mj-column></mj-section></mj-body></mjml>')
+     returning *`,
+    [brand.id],
   );
-  return { brand, contact, message };
+  const { rows: [message] } = await query(
+    'insert into messages (brand_id, contact_id, campaign_id, status) values ($1,$2,$3,$4) returning *',
+    [brand.id, contact.id, campaign.id, 'sent'],
+  );
+  return { brand, contact, campaign, message };
 }
 
 suite('GET on an unsubscribe link does NOT unsubscribe anyone', async () => {

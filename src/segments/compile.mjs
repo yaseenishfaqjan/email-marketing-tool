@@ -80,6 +80,23 @@ function compileRule(rule, p) {
     throw new SegmentError('Each rule needs a "field" and an "op".');
   }
 
+  // "Has this person done X in their product?" -- the rule that makes
+  // behavioural automations possible: trial started but feature never used,
+  // checkout begun but nothing purchased.
+  if (field === 'event') {
+    if (typeof value !== 'string' || !value) throw new SegmentError('An event rule needs an event name.');
+    let window = '';
+    if (rule.within_days !== undefined) {
+      const n = Number(rule.within_days);
+      if (!Number.isInteger(n) || n < 0 || n > 36500) throw new SegmentError('within_days needs a whole number of days.');
+      window = ` and e.at > now() - (${p(String(n))} || ' days')::interval`;
+    }
+    const exists = `exists (select 1 from events e where e.contact_id = c.id and e.name = ${p(value)}${window})`;
+    if (op === 'has') return exists;
+    if (op === 'not_has') return `not ${exists}`;
+    throw new SegmentError(`Unknown event operator "${op}". Use has or not_has.`);
+  }
+
   // Tags live in a join table; membership is an EXISTS, not a column compare.
   if (field === 'tag') {
     if (typeof value !== 'string') throw new SegmentError('A tag rule needs a tag id.');
