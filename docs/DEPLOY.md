@@ -75,47 +75,58 @@ In cPanel → Zone Editor, the same place you added the SES records.
 Links in an email must match the sender's domain. A tracking link on an
 unrelated hostname costs deliverability and reader trust both.
 
-## 4. Start it
+## 4. Build and start it
+
+Following the house pattern in [VPS-PLAYBOOK.md](VPS-PLAYBOOK.md): no host
+ports published, joined to `scalaro-net` so the shared nginx reaches it by
+container name.
 
 ```bash
+docker network ls | grep scalaro     # confirm the network name
+
 cd /opt/mailer/deploy
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml logs -f mailer-api
 ```
 
-Migrations run automatically on start. Then:
+Migrations and the starter templates run automatically on start. Then, from
+inside the network:
 
 ```bash
-curl -s localhost:8098/health
+docker exec scalaro-nginx-1 wget -qO- http://mailer-api:8080/health
 # {"ok":true,"env":"production","sesSandbox":true}
 ```
 
-## 5. nginx and TLS
+## 5. Certificate, then nginx
 
-> **On this server nginx runs in a container** (`scalaro-nginx-1`), which holds
-> ports 80 and 443. The host's nginx is installed but not serving, so adding a
-> file to `/etc/nginx/sites-enabled/` does nothing. The vhost goes into the
-> container's config directory, and the container is reloaded.
+**Certificate first.** nginx will not start with an `ssl_certificate` path
+that does not exist, so getting the cert before adding the HTTPS block avoids
+taking every other site down with a failed reload.
+
+The webroot is already mounted into the nginx container and the ACME location
+blocks already exist, so this needs nothing stopped:
 
 ```bash
-# Where that container reads its config from:
-docker inspect scalaro-nginx-1 --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}
-{{end}}'
+certbot certonly --webroot -w /etc/letsencrypt/www \
+  -d links.scalaro.io \
+  --email yasinishfaq5@gmail.com --agree-tos --non-interactive
 ```
 
-Add the server block from `deploy/nginx.conf` there, proxying to
-`127.0.0.1:8098`, then:
+Then add the two server blocks from `deploy/nginx.conf` to
+`/opt/scalaro/nginx.conf`, and reload:
 
 ```bash
-docker exec scalaro-nginx-1 nginx -t
-docker exec scalaro-nginx-1 nginx -s reload
+cd /opt/scalaro
+docker compose exec nginx nginx -t
+docker compose exec nginx nginx -s reload
 ```
 
-Check the public paths answer:
+Check the public paths answer, and that the admin surface does not:
 
 ```bash
-curl -sI https://links.scalaro.io/f/test.js        # 200, application/javascript
-curl -s  https://links.scalaro.io/v1/brands        # 401 — admin is not public
+curl -sI https://links.scalaro.io/health
+curl -sI https://links.scalaro.io/f/test.js       # 200, application/javascript
+curl -sI https://links.scalaro.io/v1/brands       # 404 — admin is not on this host
 ```
 
 ## 6. Point SES events at it

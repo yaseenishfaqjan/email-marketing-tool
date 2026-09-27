@@ -1,10 +1,16 @@
-# Production. Three containers on the VPS, nothing else on the box touched.
+# Production, following the VPS playbook in docs/VPS-PLAYBOOK.md.
 #
-#   docker compose -f docker-compose.prod.yml up -d
+#   cd /opt/mailer/deploy && docker compose -f docker-compose.prod.yml up -d
+#
+# No host ports are published. mailer-api joins scalaro-net, the network the
+# shared nginx container is already on, so nginx reaches it by container name.
+# On a box already running fifteen applications, that removes the question of
+# which port is free — and nothing is exposed to the internet except through
+# nginx.
 #
 # The API and the worker are separate processes on purpose. The API answers in
 # milliseconds; the worker spends minutes draining a broadcast. Sharing a
-# process would make the signup form slow during a send, and restarting to
+# process would make the signup forms slow during a send, and restarting to
 # deploy an API fix would interrupt one.
 
 services:
@@ -25,55 +31,45 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # Not published. Nothing outside this network needs to reach the database,
-    # and a Postgres port open to the internet is found within hours.
+    # Deliberately NOT on scalaro-net. Nothing outside this stack needs to
+    # reach the database.
     networks: [mailernet]
     logging: &logging
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
 
   mailer-api:
-    image: node:22-alpine
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: mailer:latest
     container_name: mailer-api
     restart: unless-stopped
-    working_dir: /app
-    command: sh -c "npm ci --omit=dev --no-audit --no-fund && npm run migrate && npm run templates && node src/server.mjs"
+    command: sh -c "npm run migrate && npm run templates && node src/server.mjs"
     env_file: [../.env]
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://mailer:${POSTGRES_PASSWORD}@mailer-db:5432/mailer
-    ports:
-      # Bound to localhost: nginx terminates TLS and proxies in. Published on
-      # 0.0.0.0 this would serve the admin API to the open internet over plain
-      # HTTP.
-      #
-      # 8098 because this box is busy: 8085, 8090, 8092, 8095, 8096 and 8123
-      # are already taken by other apps, and 8080 by globalshield.
-      - "127.0.0.1:8098:8080"
-    volumes:
-      - ..:/app
-      - api-modules:/app/node_modules
+    expose:
+      - "8080"
     depends_on:
       mailer-db: { condition: service_healthy }
-    networks: [mailernet]
+    networks: [mailernet, scalaro-net]
     logging: *logging
 
   mailer-worker:
-    image: node:22-alpine
+    image: mailer:latest
     container_name: mailer-worker
     restart: unless-stopped
-    working_dir: /app
-    # Waits for the API to have finished migrating before it starts claiming.
-    command: sh -c "npm ci --omit=dev --no-audit --no-fund && sleep 15 && node src/worker/send-worker.mjs"
+    # Waits for the API to finish migrating before it starts claiming work.
+    command: sh -c "sleep 20 && node src/worker/send-worker.mjs"
     env_file: [../.env]
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://mailer:${POSTGRES_PASSWORD}@mailer-db:5432/mailer
-    volumes:
-      - ..:/app
-      - worker-modules:/app/node_modules
     depends_on:
       mailer-db: { condition: service_healthy }
+      mailer-api: { condition: service_started }
     # ONE worker. Each process owns its own send-rate token bucket, so two
     # would together exceed the SES rate. Scaling past one means moving the
     # rate limiter to Redis — see the note in the README.
@@ -87,8 +83,8 @@ services:
 
 volumes:
   mailer-data:
-  api-modules:
-  worker-modules:
 
 networks:
   mailernet:
+  scalaro-net:
+    external: true
