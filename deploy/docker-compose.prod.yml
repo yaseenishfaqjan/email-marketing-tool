@@ -64,6 +64,10 @@ services:
 
   mailer-worker:
     image: mailer:latest
+    # mailer-api builds this image; the worker only runs it. Without this,
+    # compose tries the registry first and prints a "pull access denied"
+    # error on every deploy before falling through to the local build.
+    pull_policy: never
     container_name: mailer-worker
     restart: unless-stopped
     # Waits for the API to finish migrating before it starts claiming work.
