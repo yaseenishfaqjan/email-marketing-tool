@@ -46,7 +46,10 @@ services:
       # Bound to localhost: nginx terminates TLS and proxies in. Published on
       # 0.0.0.0 this would serve the admin API to the open internet over plain
       # HTTP.
-      - "127.0.0.1:8090:8080"
+      #
+      # 8098 because this box is busy: 8085, 8090, 8092, 8095, 8096 and 8123
+      # are already taken by other apps, and 8080 by globalshield.
+      - "127.0.0.1:8098:8080"
     volumes:
       - ..:/app
       - api-modules:/app/node_modules

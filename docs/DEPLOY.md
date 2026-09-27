@@ -86,17 +86,29 @@ docker compose -f docker-compose.prod.yml logs -f mailer-api
 Migrations run automatically on start. Then:
 
 ```bash
-curl -s localhost:8090/health
+curl -s localhost:8098/health
 # {"ok":true,"env":"production","sesSandbox":true}
 ```
 
 ## 5. nginx and TLS
 
+> **On this server nginx runs in a container** (`scalaro-nginx-1`), which holds
+> ports 80 and 443. The host's nginx is installed but not serving, so adding a
+> file to `/etc/nginx/sites-enabled/` does nothing. The vhost goes into the
+> container's config directory, and the container is reloaded.
+
 ```bash
-cp /opt/mailer/deploy/nginx.conf /etc/nginx/sites-available/mailer
-ln -s /etc/nginx/sites-available/mailer /etc/nginx/sites-enabled/
-nginx -t && systemctl reload nginx
-certbot --nginx -d links.scalaro.io
+# Where that container reads its config from:
+docker inspect scalaro-nginx-1 --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}
+{{end}}'
+```
+
+Add the server block from `deploy/nginx.conf` there, proxying to
+`127.0.0.1:8098`, then:
+
+```bash
+docker exec scalaro-nginx-1 nginx -t
+docker exec scalaro-nginx-1 nginx -s reload
 ```
 
 Check the public paths answer:
