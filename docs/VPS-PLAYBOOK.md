@@ -159,25 +159,40 @@ cd /opt/scalaro && docker compose exec nginx nginx -t
 **Get the certificate before the HTTPS block is active** — nginx will not
 start with an `ssl_certificate` path that does not exist yet.
 
-### Webroot (preferred — no downtime)
+### Standalone — the convention on this box
 
-The ACME challenge location is already in the nginx blocks above, so:
+Sixteen of the nineteen certificates here renew standalone, and the global
+renewal hooks stop nginx to make that work. A webroot certificate therefore
+cannot renew (see *How renewal actually works on this box*, below). Match the
+convention:
 
 ```bash
-certbot certonly --webroot -w /etc/letsencrypt/www \
+certbot certonly --standalone \
   -d yourdomain.com -d www.yourdomain.com \
   --email yasinishfaq5@gmail.com --agree-tos --non-interactive
 ```
 
-### Standalone (only if webroot is unavailable)
+The pre-hook stops nginx, so nothing needs stopping by hand.
 
-Binds port 80 itself, so nginx has to stop first — which interrupts **every**
-site on the box:
+### Webroot — only after migrating the whole box
+
+No downtime, but it renews only if every port-80 block serves
+`/.well-known/acme-challenge/` from `/etc/letsencrypt/www` *and* the
+stop-nginx pre-hook is gone. Issuing one webroot certificate today gets you a
+working certificate that then fails silently at renewal:
 
 ```bash
-cd /opt/scalaro && docker compose stop nginx
-certbot certonly --standalone -d yourdomain.com --email yasinishfaq5@gmail.com --agree-tos --non-interactive
-cd /opt/scalaro && docker compose start nginx
+certbot certonly --webroot -w /etc/letsencrypt/www \
+  -d yourdomain.com \
+  --email yasinishfaq5@gmail.com --agree-tos --non-interactive
+```
+
+If you already issued one this way, switch it over:
+
+```bash
+sed -i -e 's/^authenticator = webroot/authenticator = standalone/' \
+       -e '/^webroot_path/d' -e '/^\[\[webroot_map\]\]/d' \
+       /etc/letsencrypt/renewal/yourdomain.com.conf
 ```
 
 The certificate lands in `/etc/letsencrypt/live/yourdomain.com/`.
@@ -295,34 +310,69 @@ for anything new — it is the one already mounted into the container.
 8090, 8092, 8095, 8096, 8123. Joining `scalaro-net` avoids the question
 entirely, which is why the playbook does it that way.
 
-**The renewal cron needs fixing** — see below.
+### How renewal actually works on this box
 
-### The renewal cron
+Two global hooks do the work:
 
 ```
-30 2,14 * * * certbot renew --standalone --quiet
+/etc/letsencrypt/renewal-hooks/pre/stop-nginx.sh    docker compose stop nginx
+/etc/letsencrypt/renewal-hooks/post/start-nginx.sh  docker compose start nginx
 ```
 
-The certificates on this box were issued with the **webroot** authenticator,
-and `certbot renew` would normally reuse each certificate's own recorded
-method. Passing `--standalone` on the command line **overrides** that and
-forces certbot to bind port 80 — which `scalaro-nginx-1` is holding. The
-renewal will fail.
+They run for **every** certificate, and they exist because almost every
+certificate here uses the **standalone** authenticator, which binds port 80
+itself. Stopping nginx is what makes that possible.
 
-Nothing has broken yet only because no certificate has come due: Let's Encrypt
-renews at 30 days remaining, and the earliest here is 64 days out. The first
-real attempt is about a month away.
-
-The fix is to drop the flag so each certificate renews the way it was issued:
+Check the split before changing anything:
 
 ```bash
-crontab -e
-# change to:
-30 2,14 * * * certbot renew --quiet 2>&1 | logger -t certbot
+grep -h '^authenticator' /etc/letsencrypt/renewal/*.conf | sort | uniq -c
 ```
 
-Then confirm:
+As of 2026-09-27 that reads 16 standalone, 3 webroot. The consequence is
+blunt: **a webroot certificate on this box cannot renew.** The pre-hook stops
+the only thing that could serve the ACME challenge, and validation fails with
+`Connection refused`. Issue new certificates standalone, to match.
+
+The three webroot entries are worth listing, because two of them are other
+people's sites and are silently failing already:
 
 ```bash
-certbot renew --dry-run
+grep -l 'authenticator = webroot' /etc/letsencrypt/renewal/*.conf
+```
+
+The cost of the standalone convention is that every renewal takes nginx down
+for ~30 seconds, so all fifteen applications blip. Moving everything to
+webroot would remove that, but it means giving every site's port-80 block an
+`/.well-known/acme-challenge/` location first — a bigger change than it
+sounds, and not one to make while deploying something else.
+
+### Two things that were wrong here
+
+A root crontab entry ran `certbot renew --standalone --quiet` twice a day.
+Redundant — `certbot.timer` already runs `certbot renew`, and each
+certificate's recorded authenticator is the right one to use. Removed.
+
+Nothing reloaded nginx after a renewal. nginx reads certificates once, at
+startup, so a renewed certificate would sit on disk unused. Fixed with a
+deploy hook:
+
+```bash
+cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh <<'SH'
+#!/bin/sh
+if [ "$(docker inspect -f '{{.State.Running}}' scalaro-nginx-1 2>/dev/null)" = "true" ]; then
+    docker kill --signal=HUP scalaro-nginx-1
+fi
+SH
+chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+```
+
+The guard matters: deploy hooks run *before* the post-hook, so during a
+standalone renewal nginx is still stopped. A fresh start reads the new
+certificate anyway, so there is nothing to do in that case.
+
+Verify, remembering that this stops nginx for ~30 seconds:
+
+```bash
+certbot renew --cert-name <name> --dry-run
 ```

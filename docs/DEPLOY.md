@@ -103,14 +103,21 @@ docker exec scalaro-nginx-1 wget -qO- http://mailer-api:8080/health
 that does not exist, so getting the cert before adding the HTTPS block avoids
 taking every other site down with a failed reload.
 
-The webroot is already mounted into the nginx container and the ACME location
-blocks already exist, so this needs nothing stopped:
+Use **standalone**, not webroot. Sixteen of the nineteen certificates on this
+box renew standalone, and the global pre-hook in
+`/etc/letsencrypt/renewal-hooks/pre/` stops nginx so that they can. A webroot
+certificate issues fine and then fails at renewal, because the hook stops the
+only thing that could answer the challenge. `docs/VPS-PLAYBOOK.md` has the
+detail.
 
 ```bash
-certbot certonly --webroot -w /etc/letsencrypt/www \
+certbot certonly --standalone \
   -d links.scalaro.io \
   --email yasinishfaq5@gmail.com --agree-tos --non-interactive
 ```
+
+The pre-hook handles stopping and starting nginx, so nothing needs stopping by
+hand. It does mean every site on the box blips for ~30 seconds.
 
 Then add the two server blocks from `deploy/nginx.conf` to
 `/opt/scalaro/nginx.conf`, and reload:
