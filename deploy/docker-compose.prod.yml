@@ -1,6 +1,11 @@
 # Production, following the VPS playbook in docs/VPS-PLAYBOOK.md.
 #
-#   cd /opt/mailer/deploy && docker compose -f docker-compose.prod.yml up -d
+#   cd /opt/mailer/deploy && docker compose --env-file ../.env -f docker-compose.prod.yml up -d
+#
+# Note the --env-file: compose looks for a .env beside the compose file for
+# ${VAR} interpolation, and ours lives one level up. env_file: only reaches
+# the container's environment, not interpolation, so without the flag
+# POSTGRES_PASSWORD would be empty and DATABASE_URL malformed.
 #
 # No host ports are published. mailer-api joins scalaro-net, the network the
 # shared nginx container is already on, so nginx reaches it by container name.

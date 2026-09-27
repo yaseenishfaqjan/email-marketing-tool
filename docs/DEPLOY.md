@@ -85,8 +85,8 @@ container name.
 docker network ls | grep scalaro     # confirm the network name
 
 cd /opt/mailer/deploy
-docker compose -f docker-compose.prod.yml up -d --build
-docker compose -f docker-compose.prod.yml logs -f mailer-api
+docker compose --env-file ../.env -f docker-compose.prod.yml up -d --build
+docker compose --env-file ../.env -f docker-compose.prod.yml logs -f mailer-api
 ```
 
 Migrations and the starter templates run automatically on start. Then, from
@@ -144,7 +144,7 @@ verifying the signature, so the endpoint has to be reachable first.
 Confirm it arrived:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs mailer-api | grep sns
+docker compose --env-file ../.env -f docker-compose.prod.yml logs mailer-api | grep sns
 # [sns] subscription confirmed for arn:aws:sns:eu-north-1:...
 ```
 
@@ -153,7 +153,7 @@ docker compose -f docker-compose.prod.yml logs mailer-api | grep sns
 ```bash
 sed -i 's/SES_SANDBOX=true/SES_SANDBOX=false/' /opt/mailer/.env
 cd /opt/mailer/deploy
-docker compose -f docker-compose.prod.yml up -d --force-recreate mailer-api mailer-worker
+docker compose --env-file ../.env -f docker-compose.prod.yml up -d --force-recreate mailer-api mailer-worker
 ```
 
 **`docker restart` does not re-read `env_file`.** The containers must be
@@ -325,7 +325,7 @@ gunzip -c /var/backups/mailer/mailer-$(date +%F).sql.gz | \
 
 ```bash
 cd /opt/mailer && git pull
-cd deploy && docker compose -f docker-compose.prod.yml up -d --build
+cd deploy && docker compose --env-file ../.env -f docker-compose.prod.yml up -d --build
 ```
 
 Migrations run on start and are idempotent. The worker finishes its current
