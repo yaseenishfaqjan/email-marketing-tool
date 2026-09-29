@@ -12,6 +12,7 @@
 
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import config from '../config.mjs';
+import { buildMime } from './mime.mjs';
 
 let client = null;
 function getClient() {
@@ -57,6 +58,24 @@ export async function sendRaw({ raw, from, to, configurationSet }) {
   });
   const res = await getClient().send(command);
   return { messageId: res.MessageId };
+}
+
+/**
+ * Send a message spec. The provider-neutral entry point: both adapters take
+ * the same shape, and each assembles what its API wants. SES takes raw MIME,
+ * so this builds it with our own builder — which is what keeps List-Unsubscribe
+ * and the one-click POST header under our control rather than a vendor's.
+ *
+ * @param {object} m   the spec buildMime takes, plus `from` and
+ *                     `configurationSet`
+ */
+export async function send(m) {
+  return sendRaw({
+    raw: buildMime(m),
+    from: m.from,
+    to: m.to,
+    configurationSet: m.configurationSet,
+  });
 }
 
 export const _test = { setClient: (c) => { client = c; } };

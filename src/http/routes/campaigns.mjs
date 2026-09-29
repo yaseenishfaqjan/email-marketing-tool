@@ -14,8 +14,7 @@ import { materialiseCampaign, CampaignStateError } from '../../campaigns/materia
 import { lintCampaign } from '../../campaigns/lint.mjs';
 import { previewCampaign, sampleContacts } from '../../campaigns/preview.mjs';
 import { compileTemplate, renderMessage } from '../../sending/renderer.mjs';
-import { buildMime } from '../../sending/mime.mjs';
-import { sendRaw } from '../../sending/ses.mjs';
+import { send, providerName } from '../../sending/provider.mjs';
 
 const router = express.Router({ mergeParams: true });
 router.use(requireAdmin, resolveBrand);
@@ -201,22 +200,19 @@ router.post('/campaigns/:id/test', async (req, res, next) => {
       compiledHtml: compileTemplate(campaign.mjml),
     });
 
-    const { messageId } = await sendRaw({
-      raw: buildMime({
-        fromName: campaign.from_name,
-        fromEmail: campaign.from_email,
-        to,
-        replyTo: campaign.reply_to,
-        subject: rendered.subject,
-        text: rendered.text,
-        html: rendered.html,
-        unsubscribeUrl: rendered.unsubscribeUrl,
-      }),
-      from: campaign.from_email,
+    const { messageId } = await send({
+      fromName: campaign.from_name,
+      fromEmail: campaign.from_email,
       to,
+      replyTo: campaign.reply_to,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: rendered.html,
+      unsubscribeUrl: rendered.unsubscribeUrl,
+      from: campaign.from_email,
       configurationSet: campaign.ses_config_set,
     });
-    res.json({ sent: true, sesMessageId: messageId });
+    res.json({ sent: true, provider: providerName(), messageId });
   } catch (err) { next(err); }
 });
 

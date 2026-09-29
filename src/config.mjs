@@ -37,10 +37,20 @@ const config = {
   tokenSecret: required('TOKEN_SECRET'),
   adminToken: required('ADMIN_TOKEN'),
 
+  // Which adapter in src/sending/ actually talks to a provider: 'ses' or
+  // 'resend'. Everything upstream of the adapter is identical either way.
+  provider: (process.env.EMAIL_PROVIDER || 'ses').toLowerCase(),
+
   ses: {
     region: process.env.AWS_REGION || 'us-east-1',
     maxSendRate: num('SES_MAX_SEND_RATE', 10),
     sandbox: bool('SES_SANDBOX', true),
+  },
+
+  resend: {
+    apiKey: process.env.RESEND_API_KEY || '',
+    maxSendRate: num('RESEND_MAX_SEND_RATE', 8),
+    timeoutMs: num('RESEND_TIMEOUT_MS', 15000),
   },
 
   worker: {
@@ -48,6 +58,14 @@ const config = {
     pollMs: num('WORKER_POLL_MS', 2000),
   },
 };
+
+// Fail at startup rather than on the first send. A worker that starts
+// cleanly and then fails every message against a missing key looks like a
+// deliverability problem, and costs an afternoon before anyone checks the
+// environment.
+if (config.provider === 'resend' && !config.resend.apiKey) {
+  throw new Error('EMAIL_PROVIDER=resend but RESEND_API_KEY is not set');
+}
 
 if (config.tokenSecret.length < 32) {
   throw new Error('TOKEN_SECRET must be at least 32 characters. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');

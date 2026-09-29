@@ -13,8 +13,8 @@ import { pathToFileURL } from 'node:url';
 import config from '../config.mjs';
 import { pool, query, tx, close } from '../db.mjs';
 import { compileTemplate, renderMessage, trackingBase } from '../sending/renderer.mjs';
-import { buildMime } from '../sending/mime.mjs';
-import { sendRaw, classifyError } from '../sending/ses.mjs';
+
+import { send, classifyError, providerName } from '../sending/provider.mjs';
 import { TokenBucket } from '../sending/rate-limit.mjs';
 import { finaliseIfDone } from '../campaigns/materialise.mjs';
 import { tick as automationTick } from '../automations/engine.mjs';
@@ -22,7 +22,11 @@ import { confirmUrl, DEFAULTS as FORM_DEFAULTS } from '../forms/repo.mjs';
 import { headroom, recordSends } from '../sending/warmup.mjs';
 
 const MAX_ATTEMPTS = 5;
-const bucket = new TokenBucket(config.ses.maxSendRate);
+// Each provider publishes its own rate limit, and the bucket has to match the
+// one we are actually sending through — a bucket sized for SES would be
+// throttled by Resend on every batch.
+const sendRate = config.provider === 'resend' ? config.resend.maxSendRate : config.ses.maxSendRate;
+const bucket = new TokenBucket(sendRate);
 
 let running = true;
 
@@ -259,7 +263,7 @@ export async function processMessage(message) {
       : {},
   });
 
-  const raw = buildMime({
+  const spec = {
     fromName: ctx.brand.from_name,
     fromEmail: ctx.brand.from_email,
     to: contact.email,
@@ -274,17 +278,14 @@ export async function processMessage(message) {
         ctx.source.id,
       'X-Message-Id': message.id,
     },
-  });
+    from: ctx.brand.from_email,
+    configurationSet: ctx.brand.ses_config_set,
+  };
 
   await bucket.take();
 
   try {
-    const { messageId } = await sendRaw({
-      raw,
-      from: ctx.brand.from_email,
-      to: contact.email,
-      configurationSet: ctx.brand.ses_config_set,
-    });
+    const { messageId } = await send(spec);
     await markSent(message, messageId);
   } catch (err) {
     const kind = classifyError(err);
@@ -293,7 +294,9 @@ export async function processMessage(message) {
     } else {
       // Throttling means the bucket is set too high for the real quota; say so
       // once per batch rather than silently sending slower forever.
-      if (kind === 'throttle') console.warn('[worker] throttled by SES — lower SES_MAX_SEND_RATE');
+      if (kind === 'throttle') {
+        console.warn('[worker] throttled by %s — lower its max send rate', providerName());
+      }
       await requeue(message, `${err.name}: ${err.message}`);
     }
   }
@@ -396,9 +399,9 @@ export async function startDueCampaigns() {
 }
 
 async function main() {
-  console.log('[worker] started — sending at %d/s in batches of %d, automations every pass%s',
-    config.ses.maxSendRate, config.worker.batchSize,
-    config.ses.sandbox ? ' — SES SANDBOX' : '');
+  console.log('[worker] started — %s at %d/s in batches of %d, automations every pass%s',
+    providerName(), sendRate, config.worker.batchSize,
+    config.provider === 'ses' && config.ses.sandbox ? ' — SES SANDBOX' : '');
 
   let sinceHousekeeping = 0;
 
