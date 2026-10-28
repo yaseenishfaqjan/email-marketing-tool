@@ -46,14 +46,31 @@ since February 2024, and losing it silently is expensive.
 
 ## Bounces and complaints under Resend
 
-**Still to do.** The SNS webhook at `/webhooks/ses` handles SES events —
-hard bounces and complaints are written to the global suppression list
-automatically. Resend has its own webhook format and nothing consumes it yet.
+Handled, at `POST /webhooks/resend`. A hard bounce or a complaint writes the
+address to the **global** suppression list — every brand, not just the one
+that sent — because all five send from `scalaro.io` and a shared reputation is
+what is being protected.
 
-Until that exists, sending through Resend means bounces and complaints are
-**not** automatically suppressed. For the low volumes of a first brand that is
-survivable if someone watches the Resend dashboard; it is not survivable at
-scale, and it should be built before the second brand is onboarded.
+Resend signs with Svix rather than an AWS certificate: three headers
+(`svix-id`, `svix-timestamp`, `svix-signature`) over
+`${id}.${timestamp}.${body}`, HMAC-SHA256, base64. `src/http/svix.mjs` verifies
+it against `RESEND_WEBHOOK_SECRET` before anything is written, and refuses
+everything when no secret is set. That failure mode is deliberate: an
+unverified endpoint would let anyone who learns the URL suppress any address
+they name.
+
+One judgement call worth knowing. Resend reports a bounce as Permanent,
+Transient or Undetermined, and older payloads omit the field. **An unknown
+subtype is treated as permanent.** Suppressing a live address costs one
+subscriber and is undone with one call; continuing to hit a dead one raises
+the bounce rate for all five brands at once.
+
+Set it up in Resend → Webhooks:
+
+- Endpoint: `https://links.scalaro.io/webhooks/resend`
+- Events: `email.sent`, `email.delivered`, `email.delivery_delayed`,
+  `email.bounced`, `email.complained`, `email.opened`, `email.clicked`
+- Copy the signing secret (`whsec_…`) into `RESEND_WEBHOOK_SECRET`
 
 ## Switching
 

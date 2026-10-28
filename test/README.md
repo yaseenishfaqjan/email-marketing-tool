@@ -1,18 +1,26 @@
 # Tests
 
 ```bash
+cp .env.example .env    # first time only
 npm test
 ```
 
-**174 tests.** The 85 that need PostgreSQL skip cleanly without one, so the suite
-is useful before a database is set up:
+The `.env` is not optional even without a database. `src/config.mjs` fails the
+process on a missing `DATABASE_URL` — deliberately, because a missing
+`TOKEN_SECRET` silently falling back to a default would make every unsubscribe
+link ever issued forgeable. The cost is that a fresh clone cannot run a single
+test until the file exists. `.env.example` has working defaults; only
+`TOKEN_SECRET` needs a value, and any 32+ characters will do for tests.
+
+**195 tests.** The 85 that need PostgreSQL skip cleanly without one, so the
+suite is useful before a database is set up:
 
 ```
-# pass 89
+# pass 110
 # skipped 85
 ```
 
-With a database (`createdb mailer && npm run migrate`) all 174 run.
+With a database (`createdb mailer && npm run migrate`) all 195 run.
 
 ## Why `--test-concurrency=1`
 

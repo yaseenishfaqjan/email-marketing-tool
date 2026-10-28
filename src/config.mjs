@@ -49,6 +49,10 @@ const config = {
 
   resend: {
     apiKey: process.env.RESEND_API_KEY || '',
+    // Signs the bounce/complaint webhook. Without it the endpoint refuses
+    // every delivery, which is the safe failure: an unverified endpoint would
+    // let anyone suppress any address.
+    webhookSecret: process.env.RESEND_WEBHOOK_SECRET || '',
     maxSendRate: num('RESEND_MAX_SEND_RATE', 8),
     timeoutMs: num('RESEND_TIMEOUT_MS', 15000),
   },
