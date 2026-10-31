@@ -16,6 +16,7 @@ import config from './config.mjs';
 import { pool } from './db.mjs';
 
 import webhooks from './http/routes/webhooks.mjs';
+import admin from './http/routes/admin.mjs';
 import tracking from './http/routes/tracking.mjs';
 import brands from './http/routes/brands.mjs';
 import contacts from './http/routes/contacts.mjs';
@@ -63,6 +64,11 @@ export function createApp({ logErrors = true } = {}) {
   // Brand-scoped, API key: what each product calls.
   app.use('/v1', subscribe);
   app.use('/v1', events);
+
+  // The admin panel: cookie sessions, server-rendered HTML. Mounted before
+  // the JSON routes so /admin never falls through to them, and before the
+  // 404 handler, which answers in JSON.
+  app.use('/admin', admin);
 
   // Admin.
   app.use('/', dashboard);

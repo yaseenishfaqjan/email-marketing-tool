@@ -15,6 +15,7 @@ import { lintCampaign } from '../../campaigns/lint.mjs';
 import { previewCampaign, sampleContacts } from '../../campaigns/preview.mjs';
 import { compileTemplate, renderMessage } from '../../sending/renderer.mjs';
 import { send, providerName } from '../../sending/provider.mjs';
+import { knownAttributes, contactsMissingName } from '../../campaigns/lint-context.mjs';
 
 const router = express.Router({ mergeParams: true });
 router.use(requireAdmin, resolveBrand);
@@ -62,24 +63,6 @@ router.post('/campaigns', async (req, res, next) => {
 });
 
 /** The attribute names this brand's contacts actually carry, for the linter. */
-async function knownAttributes(brandId) {
-  const { rows } = await query(
-    `select distinct k from contacts c, lateral jsonb_object_keys(c.attrs) k
-      where c.brand_id = $1 limit 200`,
-    [brandId],
-  );
-  return rows.map((r) => r.k);
-}
-
-async function contactsMissingName(brandId) {
-  const { rows } = await query(
-    `select count(*)::int as n from contacts
-      where brand_id = $1 and status = 'subscribed' and (first_name is null or first_name = '')`,
-    [brandId],
-  );
-  return rows[0].n;
-}
-
 /**
  * Render the campaign as a recipient would see it.
  *
