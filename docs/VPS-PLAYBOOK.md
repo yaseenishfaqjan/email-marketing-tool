@@ -167,12 +167,23 @@ cannot renew (see *How renewal actually works on this box*, below). Match the
 convention:
 
 ```bash
-certbot certonly --standalone \
-  -d yourdomain.com -d www.yourdomain.com \
-  --email yasinishfaq5@gmail.com --agree-tos --non-interactive
+**Stop nginx yourself.** The renewal hooks in
+`/etc/letsencrypt/renewal-hooks/pre/` run on `certbot renew`, not on
+`certbot certonly`, so issuing a new certificate finds port 80 still held by
+nginx and fails with `Could not bind TCP port 80`.
+
+Use `;` after certbot rather than `&&`. If issuance fails, nginx still comes
+back up; with `&&` it would stay down and take all fifteen sites with it:
+
+```bash
+cd /opt/scalaro && docker compose stop nginx; \
+  certbot certonly --standalone -d yourdomain.com \
+    --email yasinishfaq5@gmail.com --agree-tos --non-interactive; \
+  docker compose start nginx
 ```
 
-The pre-hook stops nginx, so nothing needs stopping by hand.
+About 30 seconds of downtime across every site on the box. Renewals after
+this are hands-off: `certbot renew` does fire the hooks.
 
 ### Webroot — only after migrating the whole box
 

@@ -58,9 +58,14 @@ mailer.scalaro.io    A    209.145.55.76
 ```
 
 ```bash
-certbot certonly --standalone -d mailer.scalaro.io \
-  --email yasinishfaq5@gmail.com --agree-tos --non-interactive
+cd /opt/scalaro && docker compose stop nginx; \
+  certbot certonly --standalone -d mailer.scalaro.io \
+    --email yasinishfaq5@gmail.com --agree-tos --non-interactive; \
+  docker compose start nginx
 ```
+
+nginx is stopped by hand because the renewal pre-hook only fires on
+`certbot renew`; `certonly` would hit `Could not bind TCP port 80`.
 
 Then the server block in `deploy/nginx.conf` — the one commented out at the
 bottom — proxies the whole host to `mailer-api:8080`.

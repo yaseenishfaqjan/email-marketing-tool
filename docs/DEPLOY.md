@@ -111,13 +111,21 @@ only thing that could answer the challenge. `docs/VPS-PLAYBOOK.md` has the
 detail.
 
 ```bash
-certbot certonly --standalone \
-  -d links.scalaro.io \
-  --email yasinishfaq5@gmail.com --agree-tos --non-interactive
+cd /opt/scalaro && docker compose stop nginx; \
+  certbot certonly --standalone -d links.scalaro.io \
+    --email yasinishfaq5@gmail.com --agree-tos --non-interactive; \
+  docker compose start nginx
 ```
 
-The pre-hook handles stopping and starting nginx, so nothing needs stopping by
-hand. It does mean every site on the box blips for ~30 seconds.
+**nginx has to be stopped by hand here.** The pre-hook in
+`/etc/letsencrypt/renewal-hooks/pre/` fires on `certbot renew`, not on
+`certbot certonly`, so a new certificate otherwise fails with
+`Could not bind TCP port 80`. The `;` after certbot rather than `&&` means
+nginx comes back even when issuance fails — with `&&` a failed certificate
+would leave all fifteen sites down.
+
+Every site on the box blips for ~30 seconds. Renewals afterwards are
+hands-off: `certbot renew` does fire the hooks.
 
 Then add the two server blocks from `deploy/nginx.conf` to
 `/opt/scalaro/nginx.conf`, and reload:
